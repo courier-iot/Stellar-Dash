@@ -23,10 +23,14 @@ android {
     signingConfigs {
         create("release") {
             if (signingStore != null) {
+                // Trim stray spaces/newlines pasted into secrets. Modern keystores (PKCS12) use
+                // one password for store and key, so an empty KEY_PASSWORD falls back to it.
+                val storePw = System.getenv("SIGNING_STORE_PASSWORD")?.trim().orEmpty()
+                val keyPw = System.getenv("SIGNING_KEY_PASSWORD")?.trim().orEmpty()
                 storeFile = file(signingStore)
-                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
-                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
-                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+                storePassword = storePw
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")?.trim()
+                keyPassword = keyPw.ifEmpty { storePw }
             }
         }
     }

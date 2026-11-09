@@ -794,8 +794,10 @@ class Game(private val host: GameHost) {
                 sound(Sfx.Sound.WARN)
             }
             if (d.triggered) d.t += dt
-            if (right > d.x && left < d.x + 30f && d.bottom() > headY + 4f) {
-                die(d.enc, "Door shut"); return
+            // Only the moment you reach the doorway counts; once you're in, you're through.
+            if (!d.entered && right > d.x) {
+                d.entered = true
+                if (d.bottom() > headY + 4f) { die(d.enc, "Door shut"); return }
             }
         }
 

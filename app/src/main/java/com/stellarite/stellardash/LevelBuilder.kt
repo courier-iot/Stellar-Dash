@@ -80,6 +80,7 @@ class PhaseWall(val x: Float, val enc: Encounter?)
 
 class Door(val x: Float, val base: Float, val lead: Float, val closeDur: Float, val enc: Encounter) {
     var triggered = false
+    var entered = false
     var t = 0f
     fun bottom(): Float = if (!triggered) -60f else -60f + (base + 60f) * (t / closeDur).coerceIn(0f, 1f)
 }
@@ -446,13 +447,17 @@ class LevelBuilder(private val world: World) {
     }
 
     private fun buildDoor(d: Float) {
-        val lead = lerp(1.0f, 0.85f, d)
+        // Door takes 1.5 s to drop at easy, 1.0 s at hard. It shuts at head height ~94% of the way down.
+        val closeDur = lerp(1.5f, 1.0f, d)
+        val shutT = closeDur * 0.94f
+        // Without a dash you reach the door 0.12 s after it shuts; a dash (~0.26 s gained) gets you in ~0.14 s early.
+        val lead = shutT + 0.12f + 20f / s
         val off = s * (lead + 0.3f) + 80f
         val x = featurePlatform(off, 40f, 0.6f)
         val top = world.lastTop
         val dx = x + off
         val e = enc(Skill.DOOR, dx, dx + 40f, Action.DASH)
-        world.doors.add(Door(dx, top, lead, lead * lerp(0.82f, 0.74f, d), e))
+        world.doors.add(Door(dx, top, lead, closeDur, e))
     }
 
     private fun buildMeteor(d: Float) {
