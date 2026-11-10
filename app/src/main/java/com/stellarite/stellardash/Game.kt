@@ -80,6 +80,10 @@ class Game(private val host: GameHost) {
     private val dashDur = 0.22f
     private val dashMul = 2.2f
     private val dashCooldown = 0.9f
+    /** Slide meter: 3 s of sliding, refills fully in 1 s when not sliding. Jumping ends a slide press. */
+    private val slideMax = 3.0f
+    private val slideRecharge = 1.0f
+    private val slamDelay = 0.12f
 
     // ---- Screen ----
     @Volatile private var screenW = 1280
@@ -129,6 +133,10 @@ class Game(private val host: GameHost) {
     private var squash = 0f
     private var trailT = 0f
     private var dashT = 0f
+    private var slideEnergy = 3.0f
+    private var slideEmpty = false
+    private var slideLocked = true
+    private var slamPending = 0f
     private var dashCd = 0f
     private var airDashUsed = false
     private var pressT = 0f
@@ -376,6 +384,10 @@ class Game(private val host: GameHost) {
         squash = 0f
         dashT = 0f
         dashCd = 0f
+        slideEnergy = slideMax
+        slideEmpty = false
+        slideLocked = true
+        slamPending = 0f
         airDashUsed = false
         hopEnc = null
         groundPlat = null
@@ -395,7 +407,7 @@ class Game(private val host: GameHost) {
 
     // ================= Control layout =================
     private fun slideBtn() = RectF(30f, viewH - 190f, 250f, viewH - 30f)
-    private fun dashBtn() = RectF(viewW - 470f, viewH - 160f, viewW - 290f, viewH - 30f)
+    private fun dashBtn() = RectF(270f, viewH - 170f, 450f, viewH - 30f)
     private fun jumpBtn() = RectF(viewW - 270f, viewH - 210f, viewW - 30f, viewH - 30f)
 
     private fun roleFor(x: Float, y: Float): Int {
@@ -444,6 +456,7 @@ class Game(private val host: GameHost) {
                 1 -> {
                     val p = ptrs[e.id]
                     if (p != null && screen == Screen.PLAYING && !buttonsLayout && !p.swiped &&
+                        p.x0 < viewW / 2f &&
                         e.x - p.x0 > 55f && abs(e.y - p.y0) < 80f && animT - p.t0 < 0.35f
                     ) {
                         p.swiped = true
@@ -543,11 +556,17 @@ class Game(private val host: GameHost) {
         // ---- actions ----
         if (dashPressed) tryDash()
         if (slidePressed) {
+            slideLocked = false
             if (!onGround) {
-                if (vy < 1100f) vy = 1100f
-                if (dashT > 0f) dashT = 0f
+                // Half-screen: wait a moment so a swipe (air-dash) isn't mistaken for a slam.
+                if (buttonsLayout) slam() else slamPending = slamDelay
             }
             onAction(Action.SLIDE)
+        }
+        if (slamPending > 0f) {
+            slamPending -= dt
+            if (!slideHeld || onGround) slamPending = 0f
+            else if (slamPending <= 0f) slam()
         }
         buffer = if (jumpPressed) bufferTime else max(0f, buffer - dt)
         sinceGround = if (onGround) 0f else sinceGround + dt
@@ -558,6 +577,7 @@ class Game(private val host: GameHost) {
                 jumpT = 0f
                 onGround = false
                 sliding = false
+                slideLocked = true
                 ph = standH
                 sinceGround = coyote
                 buffer = 0f
@@ -630,7 +650,20 @@ class Game(private val host: GameHost) {
         }
 
         // ---- sliding state ----
-        sliding = slideHeld && onGround
+        sliding = slideHeld && onGround && !slideLocked && !slideEmpty
+        if (sliding) {
+            slideEnergy -= dt
+            if (slideEnergy <= 0f) {
+                slideEnergy = 0f
+                slideEmpty = true
+                slideLocked = true
+                sliding = false
+                addFloat("SLIDE OUT", px, fy - 60f, blue)
+            }
+        } else {
+            slideEnergy = min(slideMax, slideEnergy + dt * slideMax / slideRecharge)
+            if (slideEmpty && slideEnergy >= slideMax) slideEmpty = false
+        }
         val newH = if (sliding) slideH else standH
         if (newH != ph) {
             if (sliding) sound(Sfx.Sound.SLIDE)
@@ -872,11 +905,19 @@ class Game(private val host: GameHost) {
         if (cleanupT > 0.5f) { cleanupT = 0f; builder.cleanup(camX - 300f) }
     }
 
+    private fun slam() {
+        slamPending = 0f
+        if (onGround) return
+        if (vy < 1100f) vy = 1100f
+        if (dashT > 0f) dashT = 0f
+    }
+
     private fun tryDash() {
         if (dashCd > 0f) return
         if (!onGround && airDashUsed) return
         dashT = dashDur
         dashCd = dashCooldown
+        slamPending = 0f
         if (!onGround) { airDashUsed = true; vy = 0f }
         sound(Sfx.Sound.DASH)
         burst(px, fy - ph / 2f, 10, Color.WHITE, 200f, 0.3f)
@@ -1552,6 +1593,14 @@ class Game(private val host: GameHost) {
             c.translate(0f, ph / 2f)
         }
         val w = if (sliding) pw * 1.25f else pw
+        if (slideEnergy < slideMax) {
+            // slide meter under the player (grey while recharging from empty)
+            val k = (slideEnergy / slideMax).coerceIn(0f, 1f)
+            fill.color = Color.rgb(20, 40, 58); fill.alpha = 200
+            c.drawRect(-24f, 6f, 24f, 11f, fill)
+            fill.color = if (slideEmpty) muted else blue; fill.alpha = 220
+            c.drawRect(-24f, 6f, -24f + 48f * k, 11f, fill)
+        }
         fill.color = if (dashT > 0f) Color.WHITE else teal
         fill.alpha = 255
         rect.set(-w / 2f, -ph, w / 2f, 0f)
@@ -1648,17 +1697,17 @@ class Game(private val host: GameHost) {
             btnStroke.alpha = 255
         } else {
             leftPaint.color = muted; leftPaint.alpha = 110
-            c.drawText("hold: SLIDE", 28f, viewH - 24f, leftPaint)
+            c.drawText("hold: SLIDE   •   swipe →: DASH", 28f, viewH - 24f, leftPaint)
             leftPaint.textAlign = Paint.Align.RIGHT
             c.drawText("tap: JUMP", viewW - 28f, viewH - 24f, leftPaint)
-            leftPaint.textAlign = Paint.Align.CENTER
-            c.drawText("swipe → DASH", viewW / 2f, viewH - 24f, leftPaint)
             leftPaint.textAlign = Paint.Align.LEFT
             leftPaint.alpha = 255
+            stroke.color = muted; stroke.alpha = 40; stroke.strokeWidth = 2f
+            c.drawLine(viewW / 2f, viewH - 60f, viewW / 2f, viewH - 10f, stroke)
             // dash readiness pip
             fill.color = if (ready) Color.WHITE else Color.rgb(60, 80, 100)
             fill.alpha = if (ready) 200 else 120
-            c.drawCircle(viewW / 2f, viewH - 56f, 7f, fill)
+            c.drawCircle(36f, viewH - 56f, 7f, fill)
         }
     }
 
@@ -1718,10 +1767,10 @@ class Game(private val host: GameHost) {
     private fun pulseAlpha() = (120 + 135 * (0.5f + 0.5f * sin(stateT * 4f))).toInt()
 
     private fun controlHint(uses: Int): String = when {
-        uses == 1 && buttonsLayout -> "Hold the SLIDE button (bottom-left)."
-        uses == 1 -> "Hold the LEFT half of the screen to slide."
-        uses == 2 && buttonsLayout -> "Press the DASH button (bottom-right)."
-        uses == 2 -> "Swipe RIGHT to dash (swipe on the jump side to jump-dash)."
+        uses == 1 && buttonsLayout -> "Hold SLIDE (bottom-left). 3 s meter, refills in 1 s; jumping ends a slide."
+        uses == 1 -> "Hold the LEFT half to slide (3 s meter, refills in 1 s; jumping ends a slide)."
+        uses == 2 && buttonsLayout -> "Press DASH (next to SLIDE, bottom-left)."
+        uses == 2 -> "Swipe RIGHT on the left (slide) side to dash. Works in mid-air too."
         else -> ""
     }
 
@@ -1881,7 +1930,7 @@ class Game(private val host: GameHost) {
             c.drawText(sub, labelX, settingRow(row) + 56f, leftPaint)
             leftPaint.textSize = 21f
         }
-        label(0, "Controls", if (buttonsLayout) "Jump, slide and dash buttons" else "Left: slide • Right: jump • Swipe: dash")
+        label(0, "Controls", if (buttonsLayout) "Slide + dash buttons left, jump button right" else "Left: hold slide, swipe → dash • Right: jump")
         drawButton(c, settingBtn(0, 0), "HALF-SCREEN", null, if (!buttonsLayout) lime else muted)
         drawButton(c, settingBtn(0, 1), "BUTTONS", null, if (buttonsLayout) lime else muted)
 

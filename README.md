@@ -28,9 +28,10 @@ Pick a layout in **Settings → Controls**:
 |---|---|---|
 | Jump | Tap/hold the right half | JUMP button (bottom-right) |
 | Slide | Hold the left half | SLIDE button (bottom-left) |
-| Dash | Swipe right anywhere (swipe on the jump side = jump-dash) | DASH button |
+| Dash | Swipe right on the left half | DASH button (next to SLIDE) |
 
 - Hold jump for a full jump, quick tap for a short hop. Jump again in mid-air to double jump.
+- **Slide meter: 3 seconds of sliding, refills fully in 1 second.** Run it dry and you wait for the full refill. Jumping ends a slide; re-press to slide again.
 - Slide while airborne = fast-fall slam. One air-dash per jump; dash cooldown ~0.9 s.
 - Dashing only makes you safe against **phase walls**. Spikes, mines and lasers still hurt.
 - Back button or the pause icon pauses.
