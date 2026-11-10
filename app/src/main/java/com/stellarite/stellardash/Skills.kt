@@ -54,7 +54,9 @@ enum class Skill(
     CHASER("Chasers", "An energy wall chases you. Dash to stay ahead, don't waste it.", Category.MOVEMENT, 14, uses = 2),
     COMBO("Combos", "Jump, dash, slide: plan the chain.", Category.MOVEMENT, 14, uses = 2),
     RHYTHM("Rhythm runs", "Obstacles on a beat. Keep the rhythm.", Category.TIMING, 15, uses = 2),
-    MIRROR("Mirror runs", "MIRROR zone: quick tap = big jump, hold = small hop.", Category.CHOICE, 15, expertOnly = true);
+    MIRROR("Mirror runs", "MIRROR zone: quick tap = big jump, hold = small hop.", Category.CHOICE, 15, expertOnly = true),
+    REVERSE("Reverse gravity", "Gravity flips: you run on the roof. Jump pushes you DOWN.", Category.CONTROL, 16),
+    ZEROG("Zero gravity", "No gravity: tap jump to float up, slide to sink. Fly through the gaps.", Category.CONTROL, 16, uses = 1);
 
     companion object {
         val ALL = values()

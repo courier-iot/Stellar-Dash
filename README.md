@@ -6,25 +6,27 @@ Your runner never stops. Read the terrain, react to warnings, and survive as lon
 
 ## Modes
 
-- **Endless** — run as far as you can. Speed keeps climbing.
-- **Trainer** — an endless loop of reaction training:
-  1. **Test (25 levels):** calibrates your reactions. New hazards are introduced one pair at a time.
-  2. **Training (100 levels):** generated from your results. Your weakest hazards show up more, and each
-     hazard's difficulty adapts on its own (pass → harder, fail → easier).
-  3. **Retest (25 levels):** same structure as the test, so the results compare fairly.
-  4. Back to Training, then Retest again, forever. Each loop is a new **Stage**.
-  Dying restarts the level. Every attempt counts as data.
-  - **Star map:** each level is a star; clearing one lights the link to the next. Training is split
-    into 4 sectors of 25 stars.
-  - **Re-evaluation every 10 training levels:** recent results are compared with your last test and
-    the training focus is re-aimed (◇ stars on the map).
-  - **Hazard hints:** badges above hazards during training levels and on the test level where a
-    hazard is introduced (Settings → Hazard hints). Never shown in Expert.
-- **Expert Trainer** — the same loop with ~10% more speed, much denser hazards, extra mines,
-  and **3 lives**. Lose them all and you go back to the last checkpoint (every 5 levels).
-- **Profile** — a reflex map: one node per test/retest that climbs as your rating improves,
-  plus per-skill scores, warning response time (ms), gap/spike timing (early/late),
-  and short-hop tap length.
+- **Drift** — endless run. Speed keeps climbing and new hazards ramp in.
+- **Orbit** — an endless loop of reaction training:
+  1. **Test (25 levels):** calibrates you. Each new hazard is guaranteed to appear on the level that introduces it.
+  2. **Training (100 levels):** generated from your results, weakest hazards first; each hazard's difficulty
+     adapts on its own. **Re-evaluated every 10 levels** to re-aim the focus.
+  3. **Retest (25 levels):** same structure as the test, so before/after compares fairly.
+  4. Back to Training, then Retest, forever. Each loop is a new **Stage**.
+  Dying restarts the level. Every attempt counts as data. **Hazard hints** (badges above hazards) show
+  during training levels and on a hazard's intro level (Settings → Hazard hints).
+- **Deep Space** — the same loop, ~10% faster, much denser hazards, extra mines, Mirror runs,
+  and **3 lives**. Lose them all and you go back to the last checkpoint (every 5 levels). No hints.
+- **Star map** — Orbit and Deep Space open on a linked star system: each level is a star, and clearing
+  one lights the link to the next.
+- **Profile** — reflex map (one node per test/retest, climbing as you improve) plus 6 skill groups.
+- **Hangar** — spend shards on bodies, eyes, colours, trails and backgrounds. Some items unlock only
+  through specific **Awards** (21 achievements).
+
+## Pause menu
+
+Big **RESUME** square in the middle, with **Home / Map / Settings** stacked on the left and rotating tips
+along the bottom. Settings opened from pause returns to the pause screen.
 
 ## Controls
 
@@ -42,7 +44,7 @@ Pick a layout in **Settings → Controls**:
 - Dashing only makes you safe against **phase walls**. Spikes, mines and lasers still hurt.
 - Back button or the pause icon pauses.
 
-## Hazards (32, introduced two per test level)
+## Hazards (34, introduced two per test level)
 
 | Group | Hazards |
 |---|---|
@@ -52,6 +54,7 @@ Pick a layout in **Settings → Controls**:
 | Jump control | Step-ups, double gaps, short hops, air-dash gaps, moving platforms, wind |
 | Slide & dash | Low barriers, slide tunnels, cracked floors, chasers, combos |
 | Focus & memory | Blackouts, distraction flashes, speed surges |
+| Gravity | Reverse gravity (run on the roof), zero gravity (float through laser gates) |
 
 Settings also has sound, vibration, and reset buttons for Trainer / Expert progress (tap twice).
 

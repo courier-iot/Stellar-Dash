@@ -35,7 +35,9 @@ class Spike(
     val x: Float, val w: Float, val base: Float,
     val popUp: Boolean, val lead: Float, val enc: Encounter?,
     /** false = raised by something else (signal, gate, fake-out). */
-    val auto: Boolean = true
+    val auto: Boolean = true,
+    /** true = hangs from a roof, pointing down (reverse gravity). */
+    val down: Boolean = false
 ) {
     var triggered = !popUp
     var warn = 0f
@@ -87,7 +89,13 @@ class Door(val x: Float, val base: Float, val lead: Float, val closeDur: Float, 
 
 class Pad(val x: Float, val w: Float, val base: Float, val enc: Encounter)
 
-enum class ZoneKind { WIND, SURGE, BLACKOUT, MIRROR, DISTRACT, CHASER }
+/** Solid roof strip (from the top of the screen down to [bottom]) you run on under reverse gravity. */
+class Roof(val x: Float, val w: Float, val bottom: Float, val enc: Encounter)
+
+/** Always-on laser beam between y0 and y1 (zero-gravity gates). */
+class Beam(val x: Float, val y0: Float, val y1: Float, val enc: Encounter)
+
+enum class ZoneKind { WIND, SURGE, BLACKOUT, MIRROR, DISTRACT, CHASER, FLIP, ZEROG }
 
 class Zone(
     val kind: ZoneKind, val x0: Float, val x1: Float,
@@ -138,6 +146,8 @@ class World {
     val walls = ArrayList<PhaseWall>()
     val doors = ArrayList<Door>()
     val pads = ArrayList<Pad>()
+    val roofs = ArrayList<Roof>()
+    val beams = ArrayList<Beam>()
     val zones = ArrayList<Zone>()
     val reveals = ArrayList<Reveal>()
     val shards = ArrayList<Shard>()
@@ -151,7 +161,7 @@ class World {
     fun clear() {
         platforms.clear(); spikes.clear(); decoys.clear(); ceilings.clear()
         mines.clear(); meteors.clear(); fences.clear(); walls.clear(); doors.clear()
-        pads.clear(); zones.clear(); reveals.clear(); shards.clear(); encounters.clear()
+        pads.clear(); roofs.clear(); beams.clear(); zones.clear(); reveals.clear(); shards.clear(); encounters.clear()
         segCount = 0
         finishX = Float.MAX_VALUE
         levelEndX = Float.MAX_VALUE
@@ -316,6 +326,8 @@ class LevelBuilder(private val world: World) {
             Skill.SIGNAL -> buildGate(d, true)
             Skill.MIRROR -> buildMirror(d)
             Skill.PHASE -> buildPhase(d)
+            Skill.REVERSE -> buildReverse(d)
+            Skill.ZEROG -> buildZeroG(d)
         }
     }
 
@@ -757,6 +769,63 @@ class LevelBuilder(private val world: World) {
         plat(stepX, stepTop, filler(), e)
     }
 
+    private fun buildReverse(d: Float) {
+        val w = world
+        val x = incidentalGap()
+        val floor = 560f
+        val len = s * lerp(2.6f, 3.6f, d)
+        val zoneStart = x + s * 0.35f
+        val zoneEnd = zoneStart + len
+        plat(x, floor, zoneEnd - x + s * 0.9f, null)
+        val e = enc(Skill.REVERSE, zoneStart, zoneEnd + s * 0.6f, Action.JUMP)
+        e.cueY = 300f
+        w.zones.add(Zone(ZoneKind.FLIP, zoneStart, zoneEnd, 1f, 0f, e))
+        val roofY = 170f
+        // Roof: solid first stretch to land on, then gaps and hanging spikes, solid to the end of the zone.
+        var rx = zoneStart - 40f
+        var segEnd = zoneStart + s * 0.9f
+        val gaps = if (d < 0.4f) 2 else 3
+        for (i in 0 until gaps) {
+            w.roofs.add(Roof(rx, segEnd - rx, roofY, e))
+            // hanging spike on the roof segment (not on the first one)
+            if (i > 0 && rng.nextFloat() < 0.7f) {
+                val sx = rx + (segEnd - rx) * rf(0.35f, 0.55f)
+                w.spikes.add(Spike(sx, lerp(40f, 70f, d), roofY, false, 0f, e, down = true))
+            }
+            val gap = s * lerp(0.25f, 0.42f, d)
+            rx = segEnd + gap
+            segEnd = rx + s * rf(0.55f, 0.8f)
+            if (segEnd > zoneEnd - s * 0.3f) break
+        }
+        w.roofs.add(Roof(rx, zoneEnd + 20f - rx, roofY, e))
+    }
+
+    private fun buildZeroG(d: Float) {
+        val w = world
+        val x = incidentalGap()
+        val top = clampTop(max(w.lastTop, 480f))
+        val entry = s * 0.7f
+        plat(x, top, entry, null)
+        val zoneStart = x + entry - s * 0.2f
+        val len = s * lerp(2.2f, 3.0f, d)
+        val zoneEnd = zoneStart + len
+        val e = enc(Skill.ZEROG, zoneStart, zoneEnd + 60f, Action.JUMP)
+        e.cueY = 120f
+        w.zones.add(Zone(ZoneKind.ZEROG, zoneStart, zoneEnd, 1f, 0f, e))
+        // Beam gates: a vertical laser with an opening you float through.
+        val gates = if (d < 0.5f) 3 else 4
+        val gap = lerp(230f, 165f, d)
+        val step = len / (gates + 1)
+        for (i in 1..gates) {
+            val gx = zoneStart + step * i
+            val cy = rf(230f, 470f)
+            w.beams.add(Beam(gx, -40f, cy - gap / 2f, e))
+            w.beams.add(Beam(gx, cy + gap / 2f, 760f, e))
+            w.shards.add(Shard(gx + 6f, cy))
+        }
+        plat(zoneEnd, 500f, filler(1.3f), e)
+    }
+
     private fun buildPhase(d: Float) {
         val off = s * lerp(0.9f, 0.7f, d) + 100f
         val x = featurePlatform(off, 20f)
@@ -777,6 +846,8 @@ class LevelBuilder(private val world: World) {
         w.walls.removeAll { it.x + 20f < edge }
         w.doors.removeAll { it.x + 40f < edge }
         w.pads.removeAll { it.x + it.w < edge }
+        w.roofs.removeAll { it.x + it.w < edge }
+        w.beams.removeAll { it.x + 14f < edge }
         w.zones.removeAll { it.x1 < edge && (it.kind != ZoneKind.SURGE || it.done) }
         w.reveals.removeAll { it.x + 120f < edge }
         w.shards.removeAll { it.x < edge || it.taken }

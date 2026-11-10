@@ -31,6 +31,8 @@ private class Particle {
     var x = 0f; var y = 0f; var vx = 0f; var vy = 0f
     var life = 0f; var maxLife = 1f; var size = 4f; var color = Color.WHITE
     var gravity = 0f
+    /** 0 circle, 1 square, 2 star, 3 ring */
+    var shape = 0
 }
 
 private class FloatText(val text: String, var x: Float, var y: Float, val color: Int) {
@@ -49,14 +51,14 @@ private class Ptr(val x0: Float, val y0: Float, val t0: Float, var role: Int) {
 }
 
 /**
- * Stellar Dash: reaction platformer with Endless, Trainer and Expert Trainer modes.
+ * Stellar Dash: reaction platformer with Drift (endless), Orbit (training) and Deep Space (hard training) modes.
  *
  * Coordinates are "virtual units": the screen is always 720 units tall and as wide
  * as its aspect ratio needs. Y grows downwards. The player is tracked by feet position.
  */
 class Game(private val host: GameHost) {
 
-    enum class Screen { MENU, PROFILE, SETTINGS, MAP, INTRO, PLAYING, PAUSED, DEAD, CLEAR }
+    enum class Screen { MENU, PROFILE, SETTINGS, HANGAR, AWARDS, MAP, INTRO, PLAYING, PAUSED, DEAD, CLEAR }
     enum class Mode { ENDLESS, TRAINER, EXPERT }
 
     // ---- Tuning ----
@@ -104,6 +106,13 @@ class Game(private val host: GameHost) {
     private var soundOn = host.loadString("snd") != "off"
     private var vibOn = host.loadString("vib") != "off"
     private var hintsOn = host.loadString("hints") != "off"
+    private var settingsFromPause = false
+    private val meta = Meta().also { it.load(host.loadString("meta")) }
+    private val toasts = ArrayList<String>()
+    private var toastT = 0f
+    private var hangarSlot = Slot.BODY
+    private var buyConfirm: String? = null
+    private var bgId = ""
     private var confirmReset = -1
     private var confirmT = 0f
 
@@ -144,6 +153,9 @@ class Game(private val host: GameHost) {
     private var hopEnc: Encounter? = null
     private var groundPlat: Platform? = null
     private var mirror = false
+    private var flipped = false
+    private var zeroG = false
+    private var gravEnc: Encounter? = null
     private var darkness = 0f
     private var flashT = 0f
     private var surgeFlash = 0f
@@ -300,6 +312,7 @@ class Game(private val host: GameHost) {
     }
 
     fun pause() {
+        saveMeta()
         if (screen == Screen.PLAYING) {
             screen = Screen.PAUSED
             stateT = 0f
@@ -367,6 +380,7 @@ class Game(private val host: GameHost) {
 
     private fun toMenu() {
         saveProfile()
+        saveMeta()
         go(Screen.MENU)
     }
 
@@ -447,6 +461,10 @@ class Game(private val host: GameHost) {
         stateT += dt
         animT += dt
         if (confirmReset >= 0) { confirmT -= dt; if (confirmT <= 0f) confirmReset = -1 }
+        if (toasts.isNotEmpty()) {
+            toastT += dt
+            if (toastT > 3.2f) { toasts.removeAt(0); toastT = 0f }
+        }
         updateParticles(dt)
         updateFloats(dt)
         if (shake > 0f) shake = max(0f, shake - dt * 40f)
@@ -496,7 +514,9 @@ class Game(private val host: GameHost) {
                 screen == Screen.PLAYING -> go(Screen.PAUSED)
                 screen == Screen.PROFILE && profileCat >= 0 -> profileCat = -1
                 screen == Screen.MENU -> {}
-                screen == Screen.PROFILE || screen == Screen.SETTINGS || screen == Screen.MAP -> toMenu()
+                screen == Screen.SETTINGS && settingsFromPause -> { settingsFromPause = false; go(Screen.PAUSED) }
+                screen == Screen.PROFILE || screen == Screen.SETTINGS || screen == Screen.MAP ||
+                    screen == Screen.HANGAR || screen == Screen.AWARDS -> toMenu()
                 else -> leaveRun()
             }
             return
@@ -510,6 +530,8 @@ class Game(private val host: GameHost) {
             Screen.MENU -> if (tap != null) menuTap(tap)
             Screen.PROFILE -> if (tap != null) profileTap(tap)
             Screen.SETTINGS -> if (tap != null) settingsTap(tap)
+            Screen.HANGAR -> if (tap != null) hangarTap(tap)
+            Screen.AWARDS -> if (tap != null && hit(backBtnRect(), tap)) go(Screen.MENU)
             Screen.MAP -> {
                 mapLinkAnim = min(1f, mapLinkAnim + dt * 1.6f)
                 if (tap != null && stateT > 0.2f) mapTap(tap)
@@ -517,9 +539,7 @@ class Game(private val host: GameHost) {
             Screen.INTRO -> if (tap != null && stateT > 0.3f) {
                 if (hit(menuBtnRect(), tap)) leaveRun() else go(Screen.PLAYING)
             }
-            Screen.PAUSED -> if (tap != null) {
-                if (hit(menuBtnRect(), tap)) leaveRun() else go(Screen.PLAYING)
-            }
+            Screen.PAUSED -> if (tap != null) pauseTap(tap)
             Screen.DEAD -> if (tap != null && stateT > 0.5f) {
                 when {
                     hit(menuBtnRect(), tap) -> leaveRun()
@@ -546,6 +566,9 @@ class Game(private val host: GameHost) {
         var windMul = 1f
         var surgeMul = 1f
         mirror = false
+        val wasFlipped = flipped
+        flipped = false
+        zeroG = false
         var darkTarget = 0f
         for (z in world.zones) {
             when (z.kind) {
@@ -573,15 +596,29 @@ class Game(private val host: GameHost) {
                     if (flashT <= 0f) { flashT = 0.18f; spawnFlash() }
                 }
                 ZoneKind.CHASER -> {}
+                ZoneKind.FLIP -> if (px >= z.x0 && px <= z.x1) { flipped = true; gravEnc = z.enc }
+                ZoneKind.ZEROG -> if (px >= z.x0 && px <= z.x1) { zeroG = true; gravEnc = z.enc }
             }
         }
         effSpeed = speed * windMul * surgeMul
+        if (flipped != wasFlipped) {
+            onGround = false
+            sliding = false
+            ph = standH
+            if (flipped) { jumps = 1; sound(Sfx.Sound.BOUNCE) }
+        }
+        val gs = if (flipped) -1f else 1f
         // Blackouts fade in over ~0.25 s and out over ~0.4 s.
         darkness = if (darkTarget > darkness) min(1f, darkness + dt * 4f) else max(0f, darkness - dt * 2.5f)
 
         // ---- actions ----
         if (dashPressed) tryDash()
-        if (slidePressed) {
+        if (slidePressed && zeroG) {
+            vy = 420f
+            onAction(Action.SLIDE)
+        } else if (slidePressed && flipped) {
+            onAction(Action.SLIDE)
+        } else if (slidePressed) {
             slideLocked = false
             if (!onGround) {
                 // Half-screen: wait a moment so a swipe (air-dash) isn't mistaken for a slam.
@@ -596,9 +633,18 @@ class Game(private val host: GameHost) {
         }
         buffer = if (jumpPressed) bufferTime else max(0f, buffer - dt)
         sinceGround = if (onGround) 0f else sinceGround + dt
-        if (buffer > 0f) {
+        if (zeroG) {
+            buffer = 0f
+            if (jumpPressed) {
+                vy = -420f
+                onGround = false
+                onAction(Action.JUMP)
+                sound(Sfx.Sound.JUMP)
+                burst(px, fy, 6, bodyColor(), 140f, 0.3f)
+            }
+        } else if (buffer > 0f) {
             if (onGround || (sinceGround < coyote && jumps == 0)) {
-                vy = -jumpV
+                vy = -jumpV * gs
                 jumps = 1
                 jumpT = 0f
                 onGround = false
@@ -613,7 +659,7 @@ class Game(private val host: GameHost) {
                 sound(Sfx.Sound.JUMP)
                 burst(px, fy, 6, teal, 160f, 0.35f)
             } else if (jumps < 2) {
-                vy = -doubleV
+                vy = -doubleV * gs
                 jumps = 2
                 jumpT = 0f
                 buffer = 0f
@@ -640,13 +686,16 @@ class Game(private val host: GameHost) {
         // ---- vertical ----
         jumpT += dt
         val capNow = if (mirror) jumpHeld else !jumpHeld
-        if (capNow && vy < releaseCap && jumpT > minJumpTime) vy = releaseCap
+        if (!zeroG && capNow && vy * gs < releaseCap && jumpT > minJumpTime) vy = releaseCap * gs
         if (dashT > 0f && !onGround) {
             vy = 0f
+        } else if (zeroG) {
+            vy += gravity * 0.12f * dt
+            vy *= (1f - 0.6f * dt)
         } else {
-            vy += gravity * (if (vy > 0f) 1.15f else 1f) * dt
+            vy += gravity * gs * (if (vy * gs > 0f) 1.15f else 1f) * dt
         }
-        if (vy > 1500f) vy = 1500f
+        vy = vy.coerceIn(-1500f, 1500f)
         if (spin > 0f) spin = max(0f, spin - 900f * dt)
         squash += (0f - squash) * min(1f, dt * 12f)
 
@@ -675,8 +724,23 @@ class Game(private val host: GameHost) {
             else { die(p.enc, "Hit a wall"); return }
         }
 
+        // ---- roofs (reverse gravity) ----
+        if (flipped) {
+            for (r in world.roofs) {
+                if (right <= r.x || left >= r.x + r.w) continue
+                val headNow = fy - ph
+                if (headNow > r.bottom) continue
+                val prevHead = prevFeet - ph
+                if (vy <= 0f && prevHead >= r.bottom - 1f) landRoof(r, wasGround)
+                else if (vy <= 0f && r.bottom - headNow < 16f) landRoof(r, wasGround)
+                else { die(r.enc, "Hit the edge of the roof"); return }
+            }
+            if (fy - ph < -120f) { die(gravEnc, "Fell up into space"); return }
+        }
+        if (zeroG && fy - ph < 0f) { die(gravEnc, "Drifted off the track"); return }
+
         // ---- sliding state ----
-        sliding = slideHeld && onGround && !slideLocked && !slideEmpty
+        sliding = slideHeld && onGround && !slideLocked && !slideEmpty && !flipped && !zeroG
         if (sliding) {
             slideEnergy -= dt
             if (slideEnergy <= 0f) {
@@ -787,9 +851,16 @@ class Game(private val host: GameHost) {
                 if (s.warn > 0.28f) s.raise = min(1f, s.raise + dt * 14f)
             }
             if (s.raise > 0.4f) {
-                val top = s.base - spikeH * s.raise
-                if (right > s.x + 6f && left < s.x + s.w - 6f && fy > top + 8f && headY < s.base) {
-                    die(s.enc, "Spiked"); return
+                if (s.down) {
+                    val tip = s.base + spikeH * s.raise
+                    if (right > s.x + 6f && left < s.x + s.w - 6f && headY < tip - 8f && fy > s.base) {
+                        die(s.enc, "Spiked from above"); return
+                    }
+                } else {
+                    val top = s.base - spikeH * s.raise
+                    if (right > s.x + 6f && left < s.x + s.w - 6f && fy > top + 8f && headY < s.base) {
+                        die(s.enc, "Spiked"); return
+                    }
                 }
             }
         }
@@ -828,6 +899,13 @@ class Game(private val host: GameHost) {
                 if (right > m.x + 4f && left < m.x + m.size - 4f && fy > m.y + 6f && headY < m.y + m.size) {
                     die(m.enc, "Crushed by a meteor"); return
                 }
+            }
+        }
+
+        // ---- zero-g beam gates ----
+        for (b in world.beams) {
+            if (right > b.x && left < b.x + 12f && headY < b.y1 && fy > b.y0) {
+                die(b.enc, "Hit a laser gate"); return
             }
         }
 
@@ -885,6 +963,10 @@ class Game(private val host: GameHost) {
             if (dx * dx + dy * dy < 38f * 38f) {
                 s.taken = true
                 shardBonus += 25
+                meta.wallet++
+                meta.lifetimeShards++
+                if (meta.lifetimeShards >= 100) unlock(Achievement.COLLECTOR)
+                if (meta.lifetimeShards >= 1000) unlock(Achievement.HOARDER)
                 sound(Sfx.Sound.SHARD)
                 burst(s.x, s.y, 10, lime, 220f, 0.45f)
             }
@@ -902,18 +984,21 @@ class Game(private val host: GameHost) {
 
         // ---- trail ----
         trailT += dt
-        if (trailT > (if (dashT > 0f) 0.008f else 0.025f)) {
+        val trail = meta.equippedItem(Slot.TRAIL).id
+        val every = when {
+            dashT > 0f -> 0.008f
+            trail == "trail_dots" -> 0.07f
+            trail == "trail_ribbon" -> 0.008f
+            trail == "trail_comet" -> 0.012f
+            else -> 0.025f
+        }
+        if (trailT > every) {
             trailT = 0f
-            val p = obtainParticle()
-            p.x = px - pw / 2f; p.y = fy - ph * (0.2f + Random.nextFloat() * 0.7f)
-            p.vx = -60f; p.vy = 0f; p.gravity = 0f
-            p.life = 0.3f; p.maxLife = 0.3f; p.size = if (dashT > 0f) 7f else 5f
-            p.color = when {
+            emitTrail(trail, px - pw / 2f, fy - ph * (0.2f + Random.nextFloat() * 0.7f), when {
                 dashT > 0f -> Color.WHITE
                 jumps == 2 -> lime
-                else -> teal
-            }
-            particles.add(p)
+                else -> bodyColor()
+            })
         }
 
         score = ((px - startX) / 10f).toInt() + shardBonus
@@ -967,6 +1052,7 @@ class Game(private val host: GameHost) {
                 e.reactMs = (runT - e.triggerT) * 1000f
                 val ex = e.expect
                 if (ex != null && ex != a) e.wrong = true
+                if (e.skill.cat == Category.REACTION && !e.wrong && e.reactMs < 250f) unlock(Achievement.QUICKDRAW)
                 if (e.skill.cat == Category.REACTION || e.skill == Skill.SIGNAL || e.skill == Skill.GATE) {
                     addFloat("${e.reactMs.roundToInt()} ms", px, fy - ph - 30f, if (e.wrong) danger else lime)
                 }
@@ -1006,12 +1092,44 @@ class Game(private val host: GameHost) {
                 Skill.CHAIN, Skill.RHYTHM -> {
                     val sd = e.intervalStdMs()
                     if (sd >= 0f) addFloat("±${sd.roundToInt()} ms", px, fy - 70f, teal)
+                    if (e.skill == Skill.RHYTHM && sd in 0f..40f) unlock(Achievement.RHYTHM)
                 }
+                else -> {}
+            }
+            when (e.skill) {
+                Skill.DECOY -> { meta.decoys++; if (meta.decoys >= 10) unlock(Achievement.NERVE) }
+                Skill.PHASE -> { meta.phases++; if (meta.phases >= 20) unlock(Achievement.PHASER) }
+                Skill.REVERSE -> { meta.flips++; if (meta.flips >= 10) unlock(Achievement.GRAVITY) }
+                Skill.ZEROG -> { meta.floats++; if (meta.floats >= 10) unlock(Achievement.FLOATER) }
                 else -> {}
             }
         }
         profile?.recordEncounter(e, died)
     }
+
+    private fun landRoof(r: Roof, wasGround: Boolean) {
+        fy = r.bottom + ph
+        vy = 0f
+        onGround = true
+        jumps = 0
+        airDashUsed = false
+        groundPlat = null
+        if (!wasGround) {
+            squash = 0.3f
+            burst(px, r.bottom, 5, bodyColor(), 120f, 0.3f)
+        }
+    }
+
+    // ---------- meta / achievements / cosmetics ----------
+    private fun saveMeta() = host.saveString("meta", meta.toJson())
+
+    private fun unlock(a: Achievement) {
+        val item = meta.award(a) ?: return
+        toasts.add("★ ${a.title}  —  unlocked ${item.name} (${item.slot.label})")
+        saveMeta()
+    }
+
+    private fun bodyColor(): Int = meta.equippedItem(Slot.COLOR).color
 
     private fun land(p: Platform, wasGround: Boolean) {
         fy = p.top
@@ -1044,15 +1162,22 @@ class Game(private val host: GameHost) {
         burst(px, fy - ph / 2f, 40, teal, 520f, 0.9f)
         burst(px, fy - ph / 2f, 20, danger, 380f, 0.7f)
         knockedBack = false
+        meta.deaths++
+        if (meta.deaths >= 100) unlock(Achievement.PERSISTENT)
         val p = profile
         if (p != null) {
             knockedBack = p.recordDeath()
             saveProfile()
-        } else if (score > best) {
-            best = score
-            newBest = true
-            host.saveBest(best)
+        } else {
+            if (score >= 2000) unlock(Achievement.FAROUT)
+            if (score >= 5000) unlock(Achievement.LIGHTYEAR)
+            if (score > best) {
+                best = score
+                newBest = true
+                host.saveBest(best)
+            }
         }
+        saveMeta()
         go(Screen.DEAD)
     }
 
@@ -1062,8 +1187,33 @@ class Game(private val host: GameHost) {
         clearPassed = runPassed
         clearTotal = runTotal
         clearAttempts = p.levelAttempts + 1
-        phaseEvent = p.completeLevel()
+        val levelBefore = p.level
+        val livesBefore = p.lives
+        val ev = p.completeLevel()
+        phaseEvent = ev
         saveProfile()
+        // achievements
+        unlock(Achievement.FIRST)
+        if (clearAttempts == 1 && runTotal >= 8 && runPassed == runTotal) unlock(Achievement.FLAWLESS)
+        if (runReactN >= 3 && clearReactAvg < 300f) unlock(Achievement.LIGHTNING)
+        if (p.expert) {
+            meta.deepClears++
+            if (meta.deepClears >= 25) unlock(Achievement.DEEPDIVER)
+            if ((levelBefore + 1) % TrainerProfile.CHECKPOINT == 0 && livesBefore == TrainerProfile.MAX_LIVES) {
+                unlock(Achievement.SURVIVOR)
+            }
+        }
+        if (ev != null) {
+            when (ev.title) {
+                "CALIBRATION COMPLETE" -> unlock(if (p.expert) Achievement.COMMANDER else Achievement.CALIBRATED)
+                "TRAINING COMPLETE" -> unlock(Achievement.GRADUATE)
+                "RETEST COMPLETE" -> {
+                    unlock(Achievement.STAGE2)
+                    if (ev.prevRating >= 0f && ev.rating - ev.prevRating >= 10f) unlock(Achievement.IMPROVER)
+                }
+            }
+        }
+        saveMeta()
         sound(Sfx.Sound.SHARD)
         burst(px, fy, 30, lime, 400f, 0.8f)
         go(Screen.CLEAR)
@@ -1074,18 +1224,46 @@ class Game(private val host: GameHost) {
         val w = 440f
         val h = 72f
         val cx = viewW / 2f
-        val y = 250f + i * 88f
+        val y = 236f + i * 84f
         return RectF(cx - w / 2f, y, cx + w / 2f, y + h)
     }
 
-    private fun profileButton(): RectF {
-        val cx = viewW / 2f
-        return RectF(cx - 220f, 524f, cx - 10f, 584f)
+    /** Row of 4 equal buttons under the modes: PROFILE, HANGAR, AWARDS, SETTINGS. */
+    private fun smallButton(i: Int): RectF {
+        val w = 190f
+        val gap = 14f
+        val x0 = viewW / 2f - (4 * w + 3 * gap) / 2f + i * (w + gap)
+        return RectF(x0, 512f, x0 + w, 570f)
     }
 
-    private fun settingsButton(): RectF {
+    // ---- pause layout ----
+    private fun resumeRect(): RectF {
+        val side = 260f
         val cx = viewW / 2f
-        return RectF(cx + 10f, 524f, cx + 220f, 584f)
+        val cy = viewH / 2f - 10f
+        return RectF(cx - side / 2f, cy - side / 2f, cx + side / 2f, cy + side / 2f)
+    }
+
+    private fun pauseItems(): List<String> =
+        if (profile != null && mode != Mode.ENDLESS) listOf("HOME", "MAP", "SETTINGS") else listOf("HOME", "SETTINGS")
+
+    private fun pauseBtn(i: Int): RectF {
+        val y = viewH / 2f - 140f + i * 96f
+        return RectF(60f, y, 320f, y + 78f)
+    }
+
+    private fun pauseTap(t: FloatArray) {
+        if (hit(resumeRect(), t)) { go(Screen.PLAYING); return }
+        val items = pauseItems()
+        for (i in items.indices) {
+            if (!hit(pauseBtn(i), t)) continue
+            when (items[i]) {
+                "HOME" -> toMenu()
+                "MAP" -> leaveRun()
+                "SETTINGS" -> { settingsFromPause = true; confirmReset = -1; go(Screen.SETTINGS) }
+            }
+            return
+        }
     }
 
     private fun menuBtnRect(): RectF = RectF(24f, viewH - 84f, 184f, viewH - 24f)
@@ -1119,12 +1297,14 @@ class Game(private val host: GameHost) {
             hit(menuButton(0), t) -> startEndless()
             hit(menuButton(1), t) -> startTrainer(false)
             hit(menuButton(2), t) -> startTrainer(true)
-            hit(profileButton(), t) -> {
+            hit(smallButton(0), t) -> {
                 getProfile(false); getProfile(true)
                 profileCat = -1
                 go(Screen.PROFILE)
             }
-            hit(settingsButton(), t) -> { confirmReset = -1; go(Screen.SETTINGS) }
+            hit(smallButton(1), t) -> { buyConfirm = null; go(Screen.HANGAR) }
+            hit(smallButton(2), t) -> go(Screen.AWARDS)
+            hit(smallButton(3), t) -> { confirmReset = -1; settingsFromPause = false; go(Screen.SETTINGS) }
         }
     }
 
@@ -1143,7 +1323,9 @@ class Game(private val host: GameHost) {
 
     private fun settingsTap(t: FloatArray) {
         when {
-            hit(backBtnRect(), t) -> go(Screen.MENU)
+            hit(backBtnRect(), t) -> {
+                if (settingsFromPause) { settingsFromPause = false; go(Screen.PAUSED) } else go(Screen.MENU)
+            }
             hit(settingBtn(0, 0), t) -> { buttonsLayout = false; host.saveString("ctl", "half") }
             hit(settingBtn(0, 1), t) -> { buttonsLayout = true; host.saveString("ctl", "buttons") }
             hit(settingBtn(1, 0), t) -> { soundOn = !soundOn; host.saveString("snd", if (soundOn) "on" else "off") }
@@ -1172,6 +1354,24 @@ class Game(private val host: GameHost) {
     }
 
     // ================= Particles, floating text, flashes =================
+    private fun emitTrail(style: String, x: Float, y: Float, color: Int) {
+        if (particles.size > 500) return
+        val p = obtainParticle()
+        p.x = x; p.y = y; p.vx = -60f; p.vy = 0f; p.gravity = 0f
+        p.color = color; p.shape = 0
+        p.life = 0.3f; p.size = 5f
+        when (style) {
+            "trail_dots" -> { p.vx = 0f; p.size = 6f; p.life = 0.5f }
+            "trail_ribbon" -> { p.y = fy - ph * 0.5f; p.vx = 0f; p.size = 4f; p.life = 0.45f }
+            "trail_stars" -> { p.shape = 2; p.size = 7f; p.vy = rf(-40f, 40f); p.life = 0.5f }
+            "trail_pixels" -> { p.shape = 1; p.size = 6f; p.life = 0.4f }
+            "trail_bubbles" -> { p.shape = 3; p.size = rf(4f, 9f); p.vy = -50f; p.life = 0.7f }
+            "trail_comet" -> { p.y = fy - ph * 0.5f; p.size = 12f; p.vx = -20f; p.life = 0.35f }
+        }
+        p.maxLife = p.life
+        particles.add(p)
+    }
+
     private fun obtainParticle(): Particle =
         if (particlePool.isNotEmpty()) particlePool.removeAt(particlePool.size - 1) else Particle()
 
@@ -1182,6 +1382,7 @@ class Game(private val host: GameHost) {
             val a = Random.nextFloat() * 6.2832f
             val sp = power * (0.3f + Random.nextFloat() * 0.7f)
             p.x = x; p.y = y
+            p.shape = 0
             p.vx = cos(a) * sp
             p.vy = sin(a) * sp
             p.gravity = 600f
@@ -1253,7 +1454,8 @@ class Game(private val host: GameHost) {
 
         drawBackground(c)
 
-        val inRun = screen != Screen.PROFILE && screen != Screen.SETTINGS && screen != Screen.MAP
+        val inRun = screen != Screen.PROFILE && screen != Screen.SETTINGS && screen != Screen.MAP &&
+            screen != Screen.HANGAR && screen != Screen.AWARDS
         if (inRun) {
             c.save()
             val sx = if (shake > 0f) rf(-shake, shake) else 0f
@@ -1275,6 +1477,8 @@ class Game(private val host: GameHost) {
         when (screen) {
             Screen.MENU -> drawMenu(c)
             Screen.MAP -> drawMap(c)
+            Screen.HANGAR -> drawHangar(c)
+            Screen.AWARDS -> drawAwards(c)
             Screen.PROFILE -> drawProfile(c)
             Screen.SETTINGS -> drawSettings(c)
             Screen.INTRO -> { drawHud(c); drawIntro(c) }
@@ -1284,12 +1488,40 @@ class Game(private val host: GameHost) {
             Screen.CLEAR -> { drawHud(c); drawClear(c) }
         }
         if (screen == Screen.SETTINGS) drawFloatsScreen(c)
+        drawToasts(c)
         c.restore()
     }
 
     private fun drawBackground(c: Canvas) {
+        applyBackground()
         c.drawRect(0f, 0f, viewW, viewH, bgPaint)
+        when (bgId) {
+            "bg_nebula" -> {
+                for (k in 0 until 4) {
+                    val bx = ((k * 520f - camX * 0.03f) % (viewW + 600f) + viewW + 600f) % (viewW + 600f) - 300f
+                    fill.color = if (k % 2 == 0) Color.rgb(160, 60, 200) else Color.rgb(230, 80, 160)
+                    fill.alpha = 26
+                    c.drawCircle(bx, 180f + k * 90f, 220f, fill)
+                }
+            }
+            "bg_aurora" -> {
+                stroke.strokeWidth = 18f
+                for (k in 0 until 3) {
+                    stroke.color = if (k == 1) Color.rgb(90, 230, 160) else Color.rgb(60, 200, 220)
+                    stroke.alpha = 40
+                    path.reset()
+                    var x = 0f
+                    while (x <= viewW) {
+                        val y = 120f + k * 50f + sin(x * 0.006f + animT * 0.6f + k) * 30f
+                        if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
+                        x += 40f
+                    }
+                    c.drawPath(path, stroke)
+                }
+            }
+        }
         for (i in starX.indices) {
+            if (bgId == "bg_void" && i % 3 != 0) continue
             val f = when (i % 3) { 0 -> 0.05f; 1 -> 0.12f; else -> 0.22f }
             var x = (starX[i] - camX * f) % starFieldW
             if (x < 0f) x += starFieldW
@@ -1298,15 +1530,34 @@ class Game(private val host: GameHost) {
             starPaint.alpha = (255 * tw * (0.4f + 0.2f * (i % 3))).toInt().coerceIn(0, 255)
             c.drawCircle(x, starY[i], starS[i], starPaint)
         }
+        if (bgId == "bg_void") return
         val span = viewW + 500f
         var plx = (viewW * 0.8f - camX * 0.02f) % span
         if (plx < -250f) plx += span
         c.save()
         c.translate(plx, 170f)
-        c.drawCircle(0f, 0f, 90f, planetPaint)
-        c.rotate(-18f)
-        rect.set(-150f, -28f, 150f, 28f)
-        c.drawOval(rect, ringPaint)
+        when (bgId) {
+            "bg_red" -> {
+                fill.color = Color.rgb(240, 80, 50); fill.alpha = 40
+                c.drawCircle(0f, 0f, 190f, fill)
+                c.drawCircle(0f, 0f, 140f, planetPaint)
+            }
+            "bg_binary" -> {
+                fill.color = Color.rgb(255, 180, 70); fill.alpha = 50
+                c.drawCircle(0f, 0f, 120f, fill)
+                c.drawCircle(0f, 0f, 70f, planetPaint)
+                fill.color = Color.rgb(255, 245, 220); fill.alpha = 230
+                c.drawCircle(-170f, -40f, 34f, fill)
+                fill.alpha = 50
+                c.drawCircle(-170f, -40f, 60f, fill)
+            }
+            else -> {
+                c.drawCircle(0f, 0f, 90f, planetPaint)
+                c.rotate(-18f)
+                rect.set(-150f, -28f, 150f, 28f)
+                c.drawOval(rect, ringPaint)
+            }
+        }
         c.restore()
     }
 
@@ -1340,6 +1591,27 @@ class Game(private val host: GameHost) {
                     }
                     symPaint.color = Color.WHITE; symPaint.textSize = 28f
                     c.drawText(if (dir > 0f) "TAILWIND »" else "« HEADWIND", z.x0 + 120f, 130f, symPaint)
+                    symPaint.textSize = 42f
+                }
+                ZoneKind.FLIP -> {
+                    fill.color = teal; fill.alpha = 26
+                    c.drawRect(z.x0, 0f, z.x1, viewH, fill)
+                    fill.alpha = 200
+                    c.drawRect(z.x0 - 3f, 0f, z.x0 + 3f, viewH, fill)
+                    c.drawRect(z.x1 - 3f, 0f, z.x1 + 3f, viewH, fill)
+                    symPaint.color = teal; symPaint.textSize = 30f
+                    c.drawText("⇅ GRAVITY FLIP", z.x0 + 150f, 300f, symPaint)
+                    c.drawText("⇅ NORMAL", z.x1 + 100f, 300f, symPaint)
+                    symPaint.textSize = 42f
+                }
+                ZoneKind.ZEROG -> {
+                    fill.color = blue; fill.alpha = 24
+                    c.drawRect(z.x0, 0f, z.x1, viewH, fill)
+                    fill.alpha = 200
+                    c.drawRect(z.x0 - 3f, 0f, z.x0 + 3f, viewH, fill)
+                    c.drawRect(z.x1 - 3f, 0f, z.x1 + 3f, viewH, fill)
+                    symPaint.color = blue; symPaint.textSize = 30f
+                    c.drawText("ZERO-G", z.x0 + 100f, 80f, symPaint)
                     symPaint.textSize = 42f
                 }
                 ZoneKind.CHASER -> if (z.triggered && !z.done) {
@@ -1391,6 +1663,31 @@ class Game(private val host: GameHost) {
                     cx += 46f
                 }
             }
+        }
+
+        // Roofs (reverse gravity)
+        for (r in world.roofs) {
+            if (r.x > viewR || r.x + r.w < viewL) continue
+            val l = max(r.x, viewL)
+            val rr = min(r.x + r.w, viewR)
+            fill.color = Color.rgb(12, 34, 50); fill.alpha = 255
+            c.drawRect(l, -40f, rr, r.bottom, fill)
+            fill.color = teal; fill.alpha = 50
+            c.drawRect(l - 2f, r.bottom - 10f, rr + 2f, r.bottom + 4f, fill)
+            fill.alpha = 255
+            c.drawRect(l, r.bottom - 5f, rr, r.bottom, fill)
+        }
+
+        // Zero-G laser gates
+        for (b in world.beams) {
+            if (b.x > viewR || b.x < viewL) continue
+            fill.color = danger; fill.alpha = 230
+            c.drawRect(b.x + 3f, b.y0, b.x + 9f, b.y1, fill)
+            fill.alpha = 60
+            c.drawRect(b.x - 4f, b.y0, b.x + 16f, b.y1, fill)
+            fill.color = Color.rgb(60, 70, 90); fill.alpha = 255
+            if (b.y0 > 0f) c.drawRect(b.x - 4f, b.y0 - 6f, b.x + 16f, b.y0 + 2f, fill)
+            if (b.y1 < viewH) c.drawRect(b.x - 4f, b.y1 - 2f, b.x + 16f, b.y1 + 6f, fill)
         }
 
         // Bounce pads
@@ -1462,7 +1759,7 @@ class Game(private val host: GameHost) {
         for (s in world.spikes) {
             if (s.x > viewR || s.x + s.w < viewL) continue
             if (s.auto && s.triggered && s.raise < 1f) drawWarning(c, s.x, s.w, s.base, s.warn)
-            if (s.raise > 0f) drawSpikes(c, s.x, s.w, s.base, spikeH * s.raise)
+            if (s.raise > 0f) drawSpikes(c, s.x, s.w, s.base, if (s.down) -spikeH * s.raise else spikeH * s.raise)
         }
 
         // Decoys
@@ -1571,17 +1868,23 @@ class Game(private val host: GameHost) {
 
         drawCues(c)
 
-        for (p in particles) {
-            val a = (p.life / p.maxLife).coerceIn(0f, 1f)
-            fill.color = p.color
-            fill.alpha = (255 * a).toInt()
-            c.drawCircle(p.x, p.y, p.size * (0.4f + 0.6f * a), fill)
-        }
+        for (p in particles) drawParticle(c, p)
 
         for (f in floats) {
             floatPaint.color = f.color
             floatPaint.alpha = (255 * (f.life / 1.1f)).toInt().coerceIn(0, 255)
             c.drawText(f.text, f.x, f.y, floatPaint)
+        }
+    }
+
+    private fun drawParticle(c: Canvas, p: Particle) {
+        val a = (p.life / p.maxLife).coerceIn(0f, 1f)
+        val r = p.size * (0.4f + 0.6f * a)
+        when (p.shape) {
+            1 -> { fill.color = p.color; fill.alpha = (255 * a).toInt(); c.drawRect(p.x - r, p.y - r, p.x + r, p.y + r, fill) }
+            2 -> { fill.color = p.color; fill.alpha = (255 * a).toInt(); drawStar(c, p.x, p.y, r * 1.4f, p.color) }
+            3 -> { stroke.color = p.color; stroke.alpha = (255 * a).toInt(); stroke.strokeWidth = 2f; c.drawCircle(p.x, p.y, r, stroke) }
+            else -> { fill.color = p.color; fill.alpha = (255 * a).toInt(); c.drawCircle(p.x, p.y, r, fill) }
         }
     }
 
@@ -1615,15 +1918,20 @@ class Game(private val host: GameHost) {
         val sqX = 1f + squash * 0.6f
         val sqY = 1f - squash * 0.6f
         c.save()
-        c.translate(px, fy + bobY)
-        c.scale(sqX, sqY)
+        if (flipped) {
+            // Upside down: anchored at the head, which touches the roof.
+            c.translate(px, fy - ph)
+            c.scale(sqX, -sqY)
+        } else {
+            c.translate(px, fy + bobY)
+            c.scale(sqX, sqY)
+        }
         if (spin > 0f) {
             c.translate(0f, -ph / 2f)
             c.rotate(360f - spin)
             c.translate(0f, ph / 2f)
         }
-        val w = if (sliding) pw * 1.25f else pw
-        if (slideEnergy < slideMax) {
+        if (slideEnergy < slideMax && !flipped) {
             // slide meter under the player (grey while recharging from empty)
             val k = (slideEnergy / slideMax).coerceIn(0f, 1f)
             fill.color = Color.rgb(20, 40, 58); fill.alpha = 200
@@ -1631,14 +1939,162 @@ class Game(private val host: GameHost) {
             fill.color = if (slideEmpty) muted else blue; fill.alpha = 220
             c.drawRect(-24f, 6f, -24f + 48f * k, 11f, fill)
         }
-        fill.color = if (dashT > 0f) Color.WHITE else teal
-        fill.alpha = 255
-        rect.set(-w / 2f, -ph, w / 2f, 0f)
-        c.drawRoundRect(rect, 10f, 10f, fill)
-        fill.color = if (mirror) violet else lime
-        rect.set(2f, -ph + ph * 0.25f, w / 2f - 4f, -ph + ph * 0.25f + 10f)
-        c.drawRoundRect(rect, 4f, 4f, fill)
+        val w = if (sliding) pw * 1.25f else pw
+        val col = if (dashT > 0f) Color.WHITE else bodyColor()
+        drawBody(c, meta.equippedItem(Slot.BODY).id, w, ph, col)
+        drawEyes(c, meta.equippedItem(Slot.EYES).id, w, ph, eyeColor(col))
         c.restore()
+    }
+
+    private fun eyeColor(body: Int): Int = when {
+        mirror -> violet
+        body == lime -> Color.rgb(4, 40, 30)
+        else -> lime
+    }
+
+    /** Draw a player figure centred on x, feet at y. Used by the Hangar previews. */
+    private fun drawAvatar(c: Canvas, x: Float, y: Float, scale: Float, body: String, eyes: String, color: Int, locked: Boolean) {
+        c.save()
+        c.translate(x, y)
+        c.scale(scale, scale)
+        drawBody(c, body, pw, standH, if (locked) Color.rgb(60, 76, 92) else color)
+        drawEyes(c, eyes, pw, standH, if (locked) Color.rgb(90, 106, 122) else eyeColor(color))
+        c.restore()
+    }
+
+    private fun drawBody(c: Canvas, id: String, w: Float, h: Float, color: Int) {
+        fill.color = color
+        fill.alpha = 255
+        val l = -w / 2f
+        val r = w / 2f
+        val t = -h
+        path.reset()
+        when (id) {
+            "body_orb" -> { rect.set(l, t, r, 0f); c.drawOval(rect, fill); return }
+            "body_capsule" -> { rect.set(l, t, r, 0f); c.drawRoundRect(rect, w / 2f, w / 2f, fill); return }
+            "body_diamond" -> { path.moveTo(0f, t); path.lineTo(r, t / 2f); path.lineTo(0f, 0f); path.lineTo(l, t / 2f) }
+            "body_tri" -> { path.moveTo(l, t); path.lineTo(r + 4f, t / 2f); path.lineTo(l, 0f) }
+            "body_hex" -> {
+                for (k in 0 until 6) {
+                    val a = k * 1.0472f
+                    val hx = cos(a) * w * 0.55f
+                    val hy = t / 2f + sin(a) * h * 0.55f
+                    if (k == 0) path.moveTo(hx, hy) else path.lineTo(hx, hy)
+                }
+            }
+            "body_star" -> {
+                for (k in 0 until 10) {
+                    val a = -1.5708f + k * 0.6283f
+                    val rr = if (k % 2 == 0) h * 0.62f else h * 0.28f
+                    val sx = cos(a) * rr
+                    val sy = t / 2f + sin(a) * rr
+                    if (k == 0) path.moveTo(sx, sy) else path.lineTo(sx, sy)
+                }
+            }
+            else -> { rect.set(l, t, r, 0f); c.drawRoundRect(rect, 10f, 10f, fill); return }
+        }
+        path.close()
+        c.drawPath(path, fill)
+    }
+
+    private fun drawEyes(c: Canvas, id: String, w: Float, h: Float, color: Int) {
+        val dark = Color.rgb(4, 12, 22)
+        val ey = -h * 0.62f
+        fill.alpha = 255
+        when (id) {
+            "eyes_dot" -> { fill.color = color; c.drawCircle(w * 0.18f, ey, 5f, fill) }
+            "eyes_twin" -> {
+                fill.color = color
+                c.drawCircle(w * 0.02f, ey, 4f, fill)
+                c.drawCircle(w * 0.28f, ey, 4f, fill)
+            }
+            "eyes_slit" -> { fill.color = color; c.drawRect(0f, ey - 2f, w * 0.42f, ey + 2f, fill) }
+            "eyes_cyclops" -> {
+                fill.color = color; c.drawCircle(w * 0.12f, ey, 8f, fill)
+                fill.color = dark; c.drawCircle(w * 0.18f, ey, 3.5f, fill)
+            }
+            "eyes_shades" -> {
+                fill.color = dark; rect.set(-w * 0.12f, ey - 6f, w * 0.46f, ey + 5f); c.drawRoundRect(rect, 3f, 3f, fill)
+                fill.color = color; c.drawRect(w * 0.26f, ey - 4f, w * 0.34f, ey - 1f, fill)
+            }
+            "eyes_x" -> {
+                stroke.color = color; stroke.alpha = 255; stroke.strokeWidth = 3f
+                val cx = w * 0.18f
+                c.drawLine(cx - 6f, ey - 6f, cx + 6f, ey + 6f, stroke)
+                c.drawLine(cx - 6f, ey + 6f, cx + 6f, ey - 6f, stroke)
+            }
+            else -> {
+                fill.color = color
+                rect.set(2f, -h + h * 0.25f, w / 2f - 4f, -h + h * 0.25f + 10f)
+                c.drawRoundRect(rect, 4f, 4f, fill)
+            }
+        }
+    }
+
+    private fun drawTrailSample(c: Canvas, id: String, x: Float, y: Float, color: Int) {
+        for (k in 0 until 6) {
+            val tx = x - 40f - k * 22f
+            val a = 1f - k / 6f
+            fill.color = color; fill.alpha = (200 * a).toInt()
+            when (id) {
+                "trail_dots" -> if (k % 2 == 0) c.drawCircle(tx, y, 5f, fill)
+                "trail_ribbon" -> c.drawRect(tx - 11f, y - 2f, tx + 11f, y + 2f, fill)
+                "trail_stars" -> drawStar(c, tx, y + (if (k % 2 == 0) -5f else 5f), 7f * a + 2f, color)
+                "trail_pixels" -> c.drawRect(tx - 5f * a, y - 5f * a, tx + 5f * a, y + 5f * a, fill)
+                "trail_bubbles" -> {
+                    stroke.color = color; stroke.alpha = (220 * a).toInt(); stroke.strokeWidth = 2f
+                    c.drawCircle(tx, y - k * 4f, 4f + k, stroke)
+                }
+                "trail_comet" -> c.drawCircle(tx, y, 11f * a + 2f, fill)
+                else -> c.drawCircle(tx, y + (if (k % 2 == 0) -3f else 3f), 4f * a + 1f, fill)
+            }
+        }
+    }
+
+    /** Small preview of a background. */
+    private fun drawSpaceSwatch(c: Canvas, id: String, l: Float, t: Float, r: Float, b: Float) {
+        val cols = spaceColors(id)
+        fill.shader = LinearGradient(0f, t, 0f, b, intArrayOf(cols[0], cols[1], cols[2]), null, Shader.TileMode.CLAMP)
+        fill.alpha = 255
+        rect.set(l, t, r, b)
+        c.drawRoundRect(rect, 12f, 12f, fill)
+        fill.shader = null
+        if (id != "bg_void") {
+            fill.color = cols[3]; fill.alpha = 255
+            c.drawCircle(r - (r - l) * 0.25f, t + (b - t) * 0.35f, (b - t) * 0.2f, fill)
+            if (id == "bg_binary") { fill.color = Color.rgb(255, 245, 220); c.drawCircle(r - (r - l) * 0.45f, t + (b - t) * 0.25f, (b - t) * 0.1f, fill) }
+        }
+        fill.color = Color.WHITE
+        for (k in 0 until 8) {
+            fill.alpha = 150
+            c.drawCircle(l + (r - l) * ((k * 37 % 100) / 100f), t + (b - t) * ((k * 53 % 90) / 100f), 1.5f, fill)
+        }
+    }
+
+    /** [top, middle, bottom, planet] colours for each background. */
+    private fun spaceColors(id: String): IntArray = when (id) {
+        "bg_nebula" -> intArrayOf(Color.rgb(14, 4, 26), Color.rgb(44, 12, 60), Color.rgb(70, 20, 70), Color.rgb(220, 90, 200))
+        "bg_ocean" -> intArrayOf(Color.rgb(2, 10, 26), Color.rgb(6, 30, 60), Color.rgb(10, 50, 90), Color.rgb(40, 140, 230))
+        "bg_aurora" -> intArrayOf(Color.rgb(2, 12, 14), Color.rgb(6, 34, 34), Color.rgb(10, 50, 44), Color.rgb(90, 230, 160))
+        "bg_red" -> intArrayOf(Color.rgb(20, 3, 6), Color.rgb(50, 8, 14), Color.rgb(80, 16, 18), Color.rgb(240, 80, 50))
+        "bg_binary" -> intArrayOf(Color.rgb(4, 8, 22), Color.rgb(16, 22, 48), Color.rgb(34, 30, 60), Color.rgb(255, 180, 70))
+        "bg_void" -> intArrayOf(Color.rgb(0, 0, 0), Color.rgb(2, 2, 6), Color.rgb(4, 4, 10), Color.BLACK)
+        else -> intArrayOf(Color.rgb(3, 6, 16), Color.rgb(8, 22, 42), Color.rgb(14, 30, 52), Color.rgb(40, 110, 130))
+    }
+
+    private fun applyBackground() {
+        val id = meta.equippedItem(Slot.SPACE).id
+        if (id == bgId) return
+        bgId = id
+        val cols = spaceColors(id)
+        bgPaint.shader = LinearGradient(0f, 0f, 0f, 720f, intArrayOf(cols[0], cols[1], cols[2]), null, Shader.TileMode.CLAMP)
+        val pc = cols[3]
+        val pr = Color.red(pc); val pg = Color.green(pc); val pb = Color.blue(pc)
+        planetPaint.shader = RadialGradient(
+            -30f, -30f, 130f,
+            intArrayOf(pc, Color.rgb(pr / 3, pg / 3, pb / 3), Color.rgb(pr / 8, pg / 8, pb / 8)),
+            floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP
+        )
     }
 
     private fun drawFlashes(c: Canvas) {
@@ -1678,7 +2134,7 @@ class Game(private val host: GameHost) {
             c.drawText("BEST $best", viewW - 110f, 46f, hudRight)
         } else {
             c.drawText("${p.phaseName()}  ${p.level + 1}/${p.phaseLength()}", 28f, 46f, hudPaint)
-            val sub = (if (p.expert) "EXPERT • " else "TRAINER • ") + "Stage ${p.cycle + 1}"
+            val sub = (if (p.expert) "DEEP SPACE • " else "ORBIT • ") + "Stage ${p.cycle + 1}"
             c.drawText(sub, 28f, 74f, hudSmall)
             if (p.expert) {
                 for (i in 0 until TrainerProfile.MAX_LIVES) {
@@ -1697,6 +2153,11 @@ class Game(private val host: GameHost) {
             fill.color = teal; fill.alpha = 255
             rect.set(bl, 30f, bl + (br - bl) * prog, 40f)
             c.drawRoundRect(rect, 5f, 5f, fill)
+        }
+        if (flipped || zeroG) {
+            symPaint.color = if (flipped) teal else blue; symPaint.textSize = 26f
+            c.drawText(if (flipped) "⇅ REVERSE GRAVITY: JUMP PUSHES DOWN" else "ZERO-G: JUMP = UP • SLIDE = DOWN", viewW / 2f, 76f, symPaint)
+            symPaint.textSize = 42f
         }
         if (surgeFlash > 0f) {
             symPaint.color = amber
@@ -1774,18 +2235,260 @@ class Game(private val host: GameHost) {
 
     private fun drawMenu(c: Canvas) {
         c.drawRect(0f, 0f, viewW, viewH, dimPaint)
-        c.drawText("STELLAR DASH", viewW / 2f, 160f, titlePaint)
-        c.drawText("Reaction training in deep space", viewW / 2f, 204f, smallPaint)
+        c.drawText("STELLAR DASH", viewW / 2f, 150f, titlePaint)
+        c.drawText("Reaction training in deep space", viewW / 2f, 194f, smallPaint)
         val tp = getProfile(false)
         val ep = getProfile(true)
-        drawButton(c, menuButton(0), "ENDLESS", if (best > 0) "Best $best" else "How far can you go?", teal)
-        drawButton(c, menuButton(1), "TRAINER", progressLabel(tp), teal)
-        drawButton(c, menuButton(2), "EXPERT TRAINER", progressLabel(ep) + " • 3 lives", danger)
+        drawButton(c, menuButton(0), "DRIFT", if (best > 0) "Endless • Best $best" else "Endless • How far can you go?", teal)
+        drawButton(c, menuButton(1), "ORBIT", "Training • " + progressLabel(tp), teal)
+        drawButton(c, menuButton(2), "DEEP SPACE", "Hard training • " + progressLabel(ep) + " • 3 lives", danger)
         btnText.textSize = 24f
-        drawButton(c, profileButton(), "PROFILE", null, lime)
-        drawButton(c, settingsButton(), "SETTINGS", null, textDim)
+        drawButton(c, smallButton(0), "PROFILE", null, lime)
+        drawButton(c, smallButton(1), "HANGAR", null, lime)
+        drawButton(c, smallButton(2), "AWARDS", null, amber)
+        drawButton(c, smallButton(3), "SETTINGS", null, textDim)
         btnText.textSize = 30f
+        drawWallet(c)
         c.drawText("Courier, of Stellarite", viewW / 2f, viewH - 24f, creditPaint)
+    }
+
+    private fun drawWallet(c: Canvas) {
+        hudRight.color = lime
+        c.drawText("◆ ${meta.wallet}", viewW - 30f, 46f, hudRight)
+        hudSmall.textAlign = Paint.Align.RIGHT
+        c.drawText("${meta.achieved.size}/${Achievement.values().size} awards", viewW - 30f, 72f, hudSmall)
+        hudSmall.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawToasts(c: Canvas) {
+        val t = toasts.firstOrNull() ?: return
+        val a = when {
+            toastT < 0.25f -> toastT / 0.25f
+            toastT > 2.8f -> ((3.2f - toastT) / 0.4f).coerceIn(0f, 1f)
+            else -> 1f
+        }
+        floatPaint.textSize = 24f
+        val w = floatPaint.measureText(t) + 60f
+        val y = 22f + 14f * (1f - a)
+        rect.set(viewW / 2f - w / 2f, y, viewW / 2f + w / 2f, y + 52f)
+        fill.color = Color.rgb(16, 30, 20); fill.alpha = (235 * a).toInt()
+        c.drawRoundRect(rect, 26f, 26f, fill)
+        btnStroke.color = amber; btnStroke.alpha = (255 * a).toInt()
+        c.drawRoundRect(rect, 26f, 26f, btnStroke)
+        btnStroke.alpha = 255
+        floatPaint.color = amber; floatPaint.alpha = (255 * a).toInt()
+        c.drawText(t, viewW / 2f, y + 34f, floatPaint)
+    }
+
+    private val pauseTips = listOf(
+        "Hold jump for a full jump. A quick tap gives a short hop.",
+        "You can double jump once in the air, and air-dash once per jump.",
+        "Slide while airborne to slam down fast.",
+        "The slide meter lasts 2 s and refills in 2 s. Run it dry and you wait for a full refill.",
+        "Jumping ends a slide. Press slide again after you land.",
+        "Dashing only protects you against phase walls.",
+        "Red ▲ means jump, blue ▼ means slide.",
+        "A ! under a crusher ceiling is a decoy. Don't jump.",
+        "Some low bars lift away to reveal spikes. Be ready to switch to a jump.",
+        "In reverse gravity you run on the roof, and jump pushes you down.",
+        "In zero-G, tap jump to float up and slide to sink.",
+        "Blackouts fade in. Memorise the track before the lights go.",
+        "Every 10 training levels Orbit re-evaluates you and re-aims your focus.",
+        "Shards unlock cosmetics in the Hangar. Some items come only from awards.",
+        "Every attempt counts as data. Deaths teach the trainer what to focus on."
+    )
+
+    private fun drawPaused(c: Canvas) {
+        c.drawRect(0f, 0f, viewW, viewH, dimPaint)
+        val cx = viewW / 2f
+        headPaint.textSize = 46f
+        c.drawText("PAUSED", cx, 96f, headPaint)
+        headPaint.textSize = 54f
+
+        // Big resume square
+        val r = resumeRect()
+        val pulse = 0.5f + 0.5f * sin(animT * 3f)
+        fill.color = teal; fill.alpha = (30 + 25 * pulse).toInt()
+        rect.set(r.left - 10f, r.top - 10f, r.right + 10f, r.bottom + 10f)
+        c.drawRoundRect(rect, 40f, 40f, fill)
+        c.drawRoundRect(r, 34f, 34f, btnFill)
+        btnStroke.color = teal; btnStroke.alpha = 255; btnStroke.strokeWidth = 4f
+        c.drawRoundRect(r, 34f, 34f, btnStroke)
+        btnStroke.strokeWidth = 3f
+        path.reset()
+        path.moveTo(cx - 34f, r.centerY() - 52f)
+        path.lineTo(cx + 50f, r.centerY() - 6f)
+        path.lineTo(cx - 34f, r.centerY() + 40f)
+        path.close()
+        fill.color = teal; fill.alpha = 255
+        c.drawPath(path, fill)
+        btnText.textSize = 28f
+        c.drawText("RESUME", cx, r.bottom - 26f, btnText)
+
+        // Home / Map / Settings stack
+        val items = pauseItems()
+        for (i in items.indices) {
+            val col = when (items[i]) { "HOME" -> teal; "MAP" -> lime; else -> textDim }
+            drawButton(c, pauseBtn(i), items[i], null, col)
+        }
+        btnText.textSize = 30f
+
+        // Rotating tips
+        val period = 4.5f
+        val idx = ((stateT / period).toInt()) % pauseTips.size
+        val ph2 = stateT % period
+        val a = when {
+            ph2 < 0.4f -> ph2 / 0.4f
+            ph2 > period - 0.4f -> (period - ph2) / 0.4f
+            else -> 1f
+        }
+        smallPaint.alpha = (255 * a).toInt()
+        c.drawText("TIP: " + pauseTips[idx], cx, viewH - 34f, smallPaint)
+        smallPaint.alpha = 255
+    }
+
+    // ---------- Hangar ----------
+    private fun hangarTab(i: Int): RectF {
+        val w = 150f
+        val gap = 10f
+        val x0 = viewW / 2f - (5 * w + 4 * gap) / 2f + i * (w + gap)
+        return RectF(x0, 96f, x0 + w, 142f)
+    }
+
+    private fun hangarCols(): Int = ((viewW - 40f - 400f + 16f) / 196f).toInt().coerceAtLeast(2)
+
+    private fun hangarCard(i: Int): RectF {
+        val cols = hangarCols()
+        val x = 400f + (i % cols) * 196f
+        val y = 168f + (i / cols) * 146f
+        return RectF(x, y, x + 180f, y + 132f)
+    }
+
+    private fun hangarTap(t: FloatArray) {
+        if (hit(backBtnRect(), t)) { go(Screen.MENU); return }
+        val slots = Slot.values()
+        for (i in slots.indices) if (hit(hangarTab(i), t)) { hangarSlot = slots[i]; buyConfirm = null; return }
+        val items = Catalog.slot(hangarSlot)
+        for (i in items.indices) {
+            if (!hit(hangarCard(i), t)) continue
+            val it = items[i]
+            when {
+                meta.isOwned(it) -> { meta.equipped[it.slot] = it.id; buyConfirm = null; saveMeta() }
+                it.achievement != null -> toasts.add("Locked: earn \"${it.achievement.title}\" — ${it.achievement.desc}")
+                meta.wallet < it.cost -> toasts.add("Need ${it.cost - meta.wallet} more ◆ shards for ${it.name}")
+                buyConfirm == it.id -> {
+                    if (meta.buy(it)) { saveMeta(); toasts.add("Unlocked ${it.name}!"); sound(Sfx.Sound.SHARD) }
+                    buyConfirm = null
+                }
+                else -> buyConfirm = it.id
+            }
+            if (toasts.size > 3) toasts.removeAt(0)
+            return
+        }
+    }
+
+    private fun drawHangar(c: Canvas) {
+        val cx = viewW / 2f
+        headPaint.textSize = 44f
+        c.drawText("HANGAR", cx, 70f, headPaint)
+        headPaint.textSize = 54f
+        btnText.textSize = 24f
+        drawButton(c, backBtnRect(), "‹ BACK", null, teal)
+        val slots = Slot.values()
+        btnText.textSize = 22f
+        for (i in slots.indices) drawButton(c, hangarTab(i), slots[i].label.uppercase(), null, if (slots[i] == hangarSlot) lime else muted)
+        btnText.textSize = 30f
+        drawWallet(c)
+
+        // Preview
+        rect.set(40f, 168f, 370f, 660f)
+        c.drawRoundRect(rect, 22f, 22f, panelPaint)
+        val bg = meta.equippedItem(Slot.SPACE)
+        drawSpaceSwatch(c, bg.id, 60f, 188f, 350f, 330f)
+        drawTrailSample(c, meta.equippedItem(Slot.TRAIL).id, 205f, 470f, bodyColor())
+        drawAvatar(c, 205f, 500f, 2.6f, meta.equippedItem(Slot.BODY).id, meta.equippedItem(Slot.EYES).id, bodyColor(), false)
+        leftPaint.color = textDim
+        leftPaint.textAlign = Paint.Align.CENTER
+        c.drawText(meta.equippedItem(Slot.BODY).name + " • " + meta.equippedItem(Slot.EYES).name, 205f, 560f, leftPaint)
+        c.drawText(meta.equippedItem(Slot.COLOR).name + " • " + meta.equippedItem(Slot.TRAIL).name, 205f, 590f, leftPaint)
+        c.drawText(bg.name, 205f, 620f, leftPaint)
+        leftPaint.textAlign = Paint.Align.LEFT
+
+        // Cards
+        val items = Catalog.slot(hangarSlot)
+        for (i in items.indices) {
+            val it = items[i]
+            val r = hangarCard(i)
+            val equipped = meta.equipped[it.slot] == it.id
+            val owned = meta.isOwned(it)
+            c.drawRoundRect(r, 16f, 16f, btnFill)
+            btnStroke.color = when {
+                equipped -> lime
+                buyConfirm == it.id -> amber
+                owned -> teal
+                else -> Color.rgb(50, 70, 90)
+            }
+            c.drawRoundRect(r, 16f, 16f, btnStroke)
+            val px2 = r.centerX()
+            val py2 = r.top + 70f
+            when (it.slot) {
+                Slot.BODY -> drawAvatar(c, px2, py2, 1.3f, it.id, meta.equippedItem(Slot.EYES).id, bodyColor(), !owned)
+                Slot.EYES -> drawAvatar(c, px2, py2, 1.3f, meta.equippedItem(Slot.BODY).id, it.id, bodyColor(), !owned)
+                Slot.COLOR -> drawAvatar(c, px2, py2, 1.3f, meta.equippedItem(Slot.BODY).id, meta.equippedItem(Slot.EYES).id, it.color, !owned)
+                Slot.TRAIL -> drawTrailSample(c, it.id, px2 + 30f, py2 - 22f, bodyColor())
+                Slot.SPACE -> drawSpaceSwatch(c, it.id, r.left + 14f, r.top + 12f, r.right - 14f, r.top + 82f)
+            }
+            leftPaint.textAlign = Paint.Align.CENTER
+            leftPaint.color = Color.WHITE; leftPaint.textSize = 18f
+            c.drawText(it.name, px2, r.bottom - 32f, leftPaint)
+            leftPaint.textSize = 15f
+            val ach = it.achievement
+            val (status, col) = when {
+                equipped -> "EQUIPPED" to lime
+                owned -> "TAP TO EQUIP" to teal
+                ach != null -> "★ ${ach.title}" to amber
+                buyConfirm == it.id -> "TAP AGAIN: ◆ ${it.cost}" to amber
+                else -> "◆ ${it.cost}" to (if (meta.wallet >= it.cost) Color.WHITE else muted)
+            }
+            leftPaint.color = col
+            c.drawText(status, px2, r.bottom - 12f, leftPaint)
+            leftPaint.textSize = 21f
+            leftPaint.textAlign = Paint.Align.LEFT
+        }
+    }
+
+    // ---------- Awards ----------
+    private fun drawAwards(c: Canvas) {
+        val cx = viewW / 2f
+        headPaint.textSize = 44f
+        c.drawText("AWARDS", cx, 70f, headPaint)
+        headPaint.textSize = 54f
+        btnText.textSize = 24f
+        drawButton(c, backBtnRect(), "‹ BACK", null, teal)
+        btnText.textSize = 30f
+        drawWallet(c)
+        val list = Achievement.values()
+        val rows = (list.size + 1) / 2
+        val colW = (viewW - 120f) / 2f
+        val rowH = min(52f, (viewH - 150f) / rows)
+        for (i in list.indices) {
+            val a = list[i]
+            val col = i / rows
+            val row = i % rows
+            val x = 50f + col * (colW + 20f)
+            val y = 118f + row * rowH
+            val got = meta.achieved.contains(a)
+            fill.alpha = 255
+            drawStar(c, x + 14f, y + 16f, 12f, if (got) amber else Color.rgb(50, 66, 84))
+            leftPaint.color = if (got) Color.WHITE else muted
+            leftPaint.textSize = 19f
+            c.drawText(a.title, x + 36f, y + 16f, leftPaint)
+            leftPaint.textSize = 14f
+            leftPaint.color = muted
+            val reward = Catalog.rewardFor(a)
+            c.drawText(a.desc + (if (reward != null) "  →  ${reward.name}" else ""), x + 36f, y + 35f, leftPaint)
+            leftPaint.textSize = 21f
+        }
     }
 
     private fun panel(c: Canvas, w: Float, h: Float) {
@@ -1853,12 +2556,6 @@ class Game(private val host: GameHost) {
         drawMenuButton(c)
     }
 
-    private fun drawPaused(c: Canvas) {
-        c.drawRect(0f, 0f, viewW, viewH, dimPaint)
-        c.drawText("PAUSED", viewW / 2f, 320f, titlePaint)
-        c.drawText("Tap to resume", viewW / 2f, 390f, bigPaint)
-        drawMenuButton(c)
-    }
 
     private fun drawDead(c: Canvas) {
         val k = min(1f, stateT * 3f)
@@ -1986,6 +2683,8 @@ class Game(private val host: GameHost) {
         Skill.COMBO -> "JUMP • DASH • SLIDE"
         Skill.RHYTHM -> "ON THE BEAT"
         Skill.MIRROR -> "CONTROLS FLIPPED"
+        Skill.REVERSE -> "GRAVITY FLIP: JUMP = DOWN"
+        Skill.ZEROG -> "TAP UP • SLIDE DOWN"
     }
 
     private fun cueColor(e: Encounter): Int = when (e.expect) {
@@ -2086,7 +2785,7 @@ class Game(private val host: GameHost) {
 
         headPaint.textSize = 40f
         headPaint.color = if (p.expert) danger else teal
-        c.drawText((if (p.expert) "EXPERT" else "TRAINER") + "  •  STAGE ${p.cycle + 1}", cx, 66f, headPaint)
+        c.drawText((if (p.expert) "DEEP SPACE" else "ORBIT") + "  •  STAGE ${p.cycle + 1}", cx, 66f, headPaint)
         headPaint.color = teal
         headPaint.textSize = 54f
         val sector = if (mapPages(p) > 1) "  •  Sector ${mapPage + 1}/${mapPages(p)}" else ""
@@ -2145,10 +2844,28 @@ class Game(private val host: GameHost) {
                 current -> {
                     val pulse = 0.5f + 0.5f * sin(animT * 4f)
                     val col = if (p.expert) danger else lime
+                    // expanding ripples
+                    for (k in 0 until 3) {
+                        val ph3 = (animT * 0.7f + k / 3f) % 1f
+                        stroke.color = col; stroke.alpha = ((1f - ph3) * 170 * appear).toInt(); stroke.strokeWidth = 3f
+                        c.drawCircle(x, y, (18f + 70f * ph3) * appear, stroke)
+                    }
                     fill.color = col; fill.alpha = ((60 + 80 * pulse) * appear).toInt()
                     c.drawCircle(x, y, (26f + 8f * pulse) * appear, fill)
                     fill.alpha = (255 * appear).toInt()
-                    drawStar(c, x, y, 15f * appear, col)
+                    drawStar(c, x, y, (15f + 3f * pulse) * appear, col)
+                    // orbiting moon
+                    val oa = animT * 2.6f
+                    fill.color = Color.WHITE; fill.alpha = (230 * appear).toInt()
+                    c.drawCircle(x + cos(oa) * 34f, y + sin(oa) * 14f, 4f, fill)
+                    // bobbing "you are here" marker
+                    val by = y - 58f - 8f * sin(animT * 4f)
+                    path.reset()
+                    path.moveTo(x - 12f, by - 10f); path.lineTo(x + 12f, by - 10f); path.lineTo(x, by + 6f); path.close()
+                    fill.color = col; fill.alpha = (255 * appear).toInt()
+                    c.drawPath(path, fill)
+                    creditPaint.color = col
+                    c.drawText("YOU ARE HERE", x, by - 18f, creditPaint)
                 }
                 else -> {
                     fill.color = muted; fill.alpha = 140
@@ -2176,9 +2893,41 @@ class Game(private val host: GameHost) {
             if (mapPage < mapPages(p) - 1) drawButton(c, pageNextRect(), "›", null, teal)
             btnText.textSize = 30f
         }
+        // PLAY button: breathing glow + sliding arrow so the eye lands on it
+        val pr = playBtnRect()
+        val pulse = 0.5f + 0.5f * sin(animT * 3.5f)
+        val pc = if (p.expert) danger else lime
+        for (k in 0 until 2) {
+            val g = 6f + k * 8f + 6f * pulse
+            fill.color = pc; fill.alpha = (70 - k * 30 + 40 * pulse).toInt().coerceIn(0, 255)
+            rect.set(pr.left - g, pr.top - g, pr.right + g, pr.bottom + g)
+            c.drawRoundRect(rect, 22f + g, 22f + g, fill)
+        }
         btnText.textSize = 28f
-        drawButton(c, playBtnRect(), "PLAY ${p.level + 1}  ▶", null, if (p.expert) danger else lime)
+        drawButton(c, pr, "PLAY ${p.level + 1}", null, pc)
+        val ax = pr.right - 34f + 8f * sin(animT * 6f)
+        path.reset()
+        path.moveTo(ax - 8f, pr.centerY() - 12f); path.lineTo(ax + 8f, pr.centerY()); path.lineTo(ax - 8f, pr.centerY() + 12f); path.close()
+        fill.color = pc; fill.alpha = 255
+        c.drawPath(path, fill)
         btnText.textSize = 30f
+        // dashed guide from the current star to PLAY
+        if (mapPage == curPage) {
+            val st = stars[p.level % MAP_PAGE]
+            val dxl = pr.left - st[0]
+            val dyl = pr.centerY() - st[1]
+            val len = kotlin.math.sqrt(dxl * dxl + dyl * dyl)
+            if (len > 120f) {
+                fill.color = pc
+                val n = (len / 26f).toInt()
+                val off = (animT * 1.2f) % 1f
+                for (k in 2 until n - 1) {
+                    val t = (k + off) / n
+                    fill.alpha = (110 * (1f - t * 0.5f)).toInt()
+                    c.drawCircle(st[0] + dxl * t, st[1] + dyl * t, 2.5f, fill)
+                }
+            }
+        }
     }
 
     private fun drawStar(c: Canvas, x: Float, y: Float, r: Float, color: Int) {
@@ -2225,12 +2974,12 @@ class Game(private val host: GameHost) {
         label(2, "Vibration", "Buzz when you crash")
         drawButton(c, settingBtn(2, 0), if (vibOn) "ON" else "OFF", null, if (vibOn) lime else muted)
 
-        label(3, "Hazard hints", "Action badges above hazards in Trainer training levels")
+        label(3, "Hazard hints", "Action badges above hazards in Orbit training levels")
         drawButton(c, settingBtn(3, 0), if (hintsOn) "ON" else "OFF", null, if (hintsOn) lime else muted)
 
         label(4, "Reset progress", "Tap twice to confirm. Can't be undone.")
-        drawButton(c, settingBtn(4, 0), if (confirmReset == 0) "SURE?" else "TRAINER", null, danger)
-        drawButton(c, settingBtn(4, 1), if (confirmReset == 1) "SURE?" else "EXPERT", null, danger)
+        drawButton(c, settingBtn(4, 0), if (confirmReset == 0) "SURE?" else "ORBIT", null, danger)
+        drawButton(c, settingBtn(4, 1), if (confirmReset == 1) "SURE?" else "DEEP SPACE", null, danger)
         btnText.textSize = 30f
     }
 
@@ -2244,8 +2993,8 @@ class Game(private val host: GameHost) {
 
         btnText.textSize = 24f
         drawButton(c, backBtnRect(), "‹ BACK", null, teal)
-        drawButton(c, tabRect(false), "TRAINER", null, if (!profileTabExpert) lime else Color.rgb(60, 90, 110))
-        drawButton(c, tabRect(true), "EXPERT", null, if (profileTabExpert) danger else Color.rgb(60, 90, 110))
+        drawButton(c, tabRect(false), "ORBIT", null, if (!profileTabExpert) lime else Color.rgb(60, 90, 110))
+        drawButton(c, tabRect(true), "DEEP SPACE", null, if (profileTabExpert) danger else Color.rgb(60, 90, 110))
         btnText.textSize = 30f
 
         drawReflexMap(c, p, 156f, 396f)
