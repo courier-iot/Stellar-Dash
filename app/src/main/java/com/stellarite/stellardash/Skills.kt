@@ -77,6 +77,8 @@ class Encounter(val skill: Skill, val refX: Float, var endX: Float) {
     var upper = false
     var checked = false
     var refY = 0f
+    /** Y position for the training hint badge. */
+    var cueY = 200f
     var dashes = 0
     val times = ArrayList<Float>()
 

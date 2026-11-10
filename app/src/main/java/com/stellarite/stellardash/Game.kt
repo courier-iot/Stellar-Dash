@@ -56,7 +56,7 @@ private class Ptr(val x0: Float, val y0: Float, val t0: Float, var role: Int) {
  */
 class Game(private val host: GameHost) {
 
-    enum class Screen { MENU, PROFILE, SETTINGS, INTRO, PLAYING, PAUSED, DEAD, CLEAR }
+    enum class Screen { MENU, PROFILE, SETTINGS, MAP, INTRO, PLAYING, PAUSED, DEAD, CLEAR }
     enum class Mode { ENDLESS, TRAINER, EXPERT }
 
     // ---- Tuning ----
@@ -81,8 +81,8 @@ class Game(private val host: GameHost) {
     private val dashMul = 2.2f
     private val dashCooldown = 0.9f
     /** Slide meter: 3 s of sliding, refills fully in 1 s when not sliding. Jumping ends a slide press. */
-    private val slideMax = 3.0f
-    private val slideRecharge = 1.0f
+    private val slideMax = 2.0f
+    private val slideRecharge = 2.0f
     private val slamDelay = 0.12f
 
     // ---- Screen ----
@@ -103,6 +103,7 @@ class Game(private val host: GameHost) {
     private var buttonsLayout = host.loadString("ctl") == "buttons"
     private var soundOn = host.loadString("snd") != "off"
     private var vibOn = host.loadString("vib") != "off"
+    private var hintsOn = host.loadString("hints") != "off"
     private var confirmReset = -1
     private var confirmT = 0f
 
@@ -133,7 +134,7 @@ class Game(private val host: GameHost) {
     private var squash = 0f
     private var trailT = 0f
     private var dashT = 0f
-    private var slideEnergy = 3.0f
+    private var slideEnergy = 2.0f
     private var slideEmpty = false
     private var slideLocked = true
     private var slamPending = 0f
@@ -159,6 +160,9 @@ class Game(private val host: GameHost) {
     private var expertProfile: TrainerProfile? = null
     private var profileTabExpert = false
     private var profileCat = -1
+    private var mapPage = 0
+    private var mapAnimate = false
+    private var mapLinkAnim = 1f
     private var cfg = endlessConfig()
     private var deathReason = ""
     private var knockedBack = false
@@ -347,8 +351,9 @@ class Game(private val host: GameHost) {
 
     private fun startTrainer(expert: Boolean) {
         mode = if (expert) Mode.EXPERT else Mode.TRAINER
-        profile = getProfile(expert)
-        prepareLevel()
+        val p = getProfile(expert)
+        profile = p
+        openMap(false)
     }
 
     private fun prepareLevel() {
@@ -363,6 +368,20 @@ class Game(private val host: GameHost) {
     private fun toMenu() {
         saveProfile()
         go(Screen.MENU)
+    }
+
+    private fun openMap(animateLink: Boolean) {
+        val p = profile ?: return
+        mapPage = p.level / MAP_PAGE
+        mapAnimate = animateLink && p.level % MAP_PAGE != 0
+        mapLinkAnim = if (mapAnimate) 0f else 1f
+        saveProfile()
+        go(Screen.MAP)
+    }
+
+    /** "Menu" from inside a trainer run goes back to the star map. */
+    private fun leaveRun() {
+        if (profile != null && mode != Mode.ENDLESS) openMap(false) else toMenu()
     }
 
     private fun resetRun() {
@@ -406,9 +425,10 @@ class Game(private val host: GameHost) {
     }
 
     // ================= Control layout =================
-    private fun slideBtn() = RectF(30f, viewH - 190f, 250f, viewH - 30f)
-    private fun dashBtn() = RectF(270f, viewH - 170f, 450f, viewH - 30f)
-    private fun jumpBtn() = RectF(viewW - 270f, viewH - 210f, viewW - 30f, viewH - 30f)
+    // All three control buttons are the same size (200 x 150).
+    private fun slideBtn() = RectF(30f, viewH - 180f, 230f, viewH - 30f)
+    private fun dashBtn() = RectF(250f, viewH - 180f, 450f, viewH - 30f)
+    private fun jumpBtn() = RectF(viewW - 230f, viewH - 180f, viewW - 30f, viewH - 30f)
 
     private fun roleFor(x: Float, y: Float): Int {
         if (!buttonsLayout) return if (x >= viewW / 2f) ROLE_JUMP else ROLE_SLIDE
@@ -476,8 +496,8 @@ class Game(private val host: GameHost) {
                 screen == Screen.PLAYING -> go(Screen.PAUSED)
                 screen == Screen.PROFILE && profileCat >= 0 -> profileCat = -1
                 screen == Screen.MENU -> {}
-                screen == Screen.PROFILE || screen == Screen.SETTINGS -> go(Screen.MENU)
-                else -> toMenu()
+                screen == Screen.PROFILE || screen == Screen.SETTINGS || screen == Screen.MAP -> toMenu()
+                else -> leaveRun()
             }
             return
         }
@@ -490,22 +510,26 @@ class Game(private val host: GameHost) {
             Screen.MENU -> if (tap != null) menuTap(tap)
             Screen.PROFILE -> if (tap != null) profileTap(tap)
             Screen.SETTINGS -> if (tap != null) settingsTap(tap)
+            Screen.MAP -> {
+                mapLinkAnim = min(1f, mapLinkAnim + dt * 1.6f)
+                if (tap != null && stateT > 0.2f) mapTap(tap)
+            }
             Screen.INTRO -> if (tap != null && stateT > 0.3f) {
-                if (hit(menuBtnRect(), tap)) toMenu() else go(Screen.PLAYING)
+                if (hit(menuBtnRect(), tap)) leaveRun() else go(Screen.PLAYING)
             }
             Screen.PAUSED -> if (tap != null) {
-                if (hit(menuBtnRect(), tap)) toMenu() else go(Screen.PLAYING)
+                if (hit(menuBtnRect(), tap)) leaveRun() else go(Screen.PLAYING)
             }
             Screen.DEAD -> if (tap != null && stateT > 0.5f) {
                 when {
-                    hit(menuBtnRect(), tap) -> toMenu()
+                    hit(menuBtnRect(), tap) -> leaveRun()
                     mode == Mode.ENDLESS -> startEndless()
-                    knockedBack -> prepareLevel()
+                    knockedBack -> openMap(false)
                     else -> { resetRun(); go(Screen.PLAYING) }
                 }
             }
             Screen.CLEAR -> if (tap != null && stateT > 0.6f) {
-                if (hit(menuBtnRect(), tap)) toMenu() else prepareLevel()
+                if (hit(menuBtnRect(), tap)) leaveRun() else openMap(true)
             }
             Screen.PLAYING -> step(dt, jumpPressed, slidePressed, dashPressed)
         }
@@ -522,7 +546,7 @@ class Game(private val host: GameHost) {
         var windMul = 1f
         var surgeMul = 1f
         mirror = false
-        darkness = max(0f, darkness - dt * 3f)
+        var darkTarget = 0f
         for (z in world.zones) {
             when (z.kind) {
                 ZoneKind.WIND -> if (px >= z.x0 && px <= z.x1) windMul = z.factor
@@ -541,7 +565,7 @@ class Game(private val host: GameHost) {
                     if (!z.triggered && px >= z.x0) { z.triggered = true; z.t = 0f }
                     if (z.triggered && !z.done) {
                         z.t += dt
-                        if (z.t < z.dur) darkness = 1f else z.done = true
+                        if (z.t < z.dur) darkTarget = 1f else z.done = true
                     }
                 }
                 ZoneKind.DISTRACT -> if (px >= z.x0 && px <= z.x1) {
@@ -552,6 +576,8 @@ class Game(private val host: GameHost) {
             }
         }
         effSpeed = speed * windMul * surgeMul
+        // Blackouts fade in over ~0.25 s and out over ~0.4 s.
+        darkness = if (darkTarget > darkness) min(1f, darkness + dt * 4f) else max(0f, darkness - dt * 2.5f)
 
         // ---- actions ----
         if (dashPressed) tryDash()
@@ -1078,7 +1104,7 @@ class Game(private val host: GameHost) {
         return RectF(x, y, x + colW, y + 64f)
     }
 
-    private fun settingRow(i: Int): Float = 150f + i * 100f
+    private fun settingRow(i: Int): Float = 120f + i * 104f
 
     private fun settingBtn(row: Int, slot: Int): RectF {
         val x = viewW / 2f + 20f + slot * 240f
@@ -1126,8 +1152,9 @@ class Game(private val host: GameHost) {
                 host.saveString("vib", if (vibOn) "on" else "off")
                 if (vibOn) host.buzz()
             }
-            hit(settingBtn(3, 0), t) -> resetTap(0)
-            hit(settingBtn(3, 1), t) -> resetTap(1)
+            hit(settingBtn(3, 0), t) -> { hintsOn = !hintsOn; host.saveString("hints", if (hintsOn) "on" else "off") }
+            hit(settingBtn(4, 0), t) -> resetTap(0)
+            hit(settingBtn(4, 1), t) -> resetTap(1)
         }
     }
 
@@ -1226,7 +1253,7 @@ class Game(private val host: GameHost) {
 
         drawBackground(c)
 
-        val inRun = screen != Screen.PROFILE && screen != Screen.SETTINGS
+        val inRun = screen != Screen.PROFILE && screen != Screen.SETTINGS && screen != Screen.MAP
         if (inRun) {
             c.save()
             val sx = if (shake > 0f) rf(-shake, shake) else 0f
@@ -1247,6 +1274,7 @@ class Game(private val host: GameHost) {
 
         when (screen) {
             Screen.MENU -> drawMenu(c)
+            Screen.MAP -> drawMap(c)
             Screen.PROFILE -> drawProfile(c)
             Screen.SETTINGS -> drawSettings(c)
             Screen.INTRO -> { drawHud(c); drawIntro(c) }
@@ -1541,6 +1569,8 @@ class Game(private val host: GameHost) {
             c.restore()
         }
 
+        drawCues(c)
+
         for (p in particles) {
             val a = (p.life / p.maxLife).coerceIn(0f, 1f)
             fill.color = p.color
@@ -1735,7 +1765,7 @@ class Game(private val host: GameHost) {
 
     private fun drawMenuButton(c: Canvas) {
         btnText.textSize = 24f
-        drawButton(c, menuBtnRect(), "MENU", null, teal)
+        drawButton(c, menuBtnRect(), if (profile != null && mode != Mode.ENDLESS) "MAP" else "MENU", null, teal)
         btnText.textSize = 30f
     }
 
@@ -1896,10 +1926,14 @@ class Game(private val host: GameHost) {
                 } else "Reflex rating $r"
                 c.drawText(txt, cx, y, bigPaint)
             }
+            for (line in ev.lines) {
+                y += 34f
+                c.drawText(line, cx, y, smallPaint)
+            }
             y += 40f
             if (ev.focus.isNotEmpty()) {
                 smallPaint.color = lime
-                c.drawText("Next 100 levels focus on: " + ev.focus.joinToString(" & ") { it.label }, cx, y, smallPaint)
+                c.drawText(ev.focusLabel + ev.focus.joinToString(" & ") { it.label }, cx, y, smallPaint)
                 smallPaint.color = textDim
             } else {
                 c.drawText("Time to retest: 25 levels to measure your improvement", cx, y, smallPaint)
@@ -1911,6 +1945,257 @@ class Game(private val host: GameHost) {
             bigPaint.alpha = 255
         }
         drawMenuButton(c)
+    }
+
+    // ---------- Training hint badges ----------
+    private fun hintsActive(): Boolean {
+        val p = profile ?: return false
+        return hintsOn && !p.expert && mode == Mode.TRAINER
+    }
+
+    private fun cueText(s: Skill): String = when (s) {
+        Skill.GAP -> "JUMP"
+        Skill.SPIKE -> "JUMP"
+        Skill.STEP -> "HOLD JUMP"
+        Skill.POPUP -> "WATCH FOR !"
+        Skill.BAR -> "SLIDE"
+        Skill.DOUBLE -> "DOUBLE JUMP"
+        Skill.HOP -> "QUICK TAP"
+        Skill.DOOR -> "DASH"
+        Skill.MINE -> "TIME IT"
+        Skill.DECOY -> "DON'T JUMP"
+        Skill.METEOR -> "WATCH ABOVE"
+        Skill.COLLAPSE -> "JUMP OFF FAST"
+        Skill.SIGNAL -> "READ ▲ / ▼"
+        Skill.GATE -> "READ THE ?"
+        Skill.LASER -> "JUMP LIT FENCES"
+        Skill.CHAIN -> "EVEN RHYTHM"
+        Skill.WIDE -> "JUMP + DASH"
+        Skill.BOUNCE -> "DOUBLE LATE"
+        Skill.TUNNEL -> "SLIDE • HOP • SLIDE"
+        Skill.CRUMBLE -> "SLIDE ACROSS"
+        Skill.MOVING -> "TIME THE LANDING"
+        Skill.WIND -> "ADJUST TIMING"
+        Skill.FAKEOUT -> "WATCH THE BAR"
+        Skill.PHASE -> "DASH THROUGH"
+        Skill.BLACKOUT -> "MEMORIZE AHEAD"
+        Skill.DISTRACT -> "IGNORE FLASHES"
+        Skill.SURGE -> "SPEED BURST"
+        Skill.SPLIT -> "PICK A ROAD"
+        Skill.CHASER -> "DASH TO ESCAPE"
+        Skill.COMBO -> "JUMP • DASH • SLIDE"
+        Skill.RHYTHM -> "ON THE BEAT"
+        Skill.MIRROR -> "CONTROLS FLIPPED"
+    }
+
+    private fun cueColor(e: Encounter): Int = when (e.expect) {
+        Action.JUMP -> teal
+        Action.SLIDE -> blue
+        Action.DASH -> Color.WHITE
+        null -> amber
+    }
+
+    /** Badges above upcoming hazards: in training levels, and on the test level that introduces a hazard. */
+    private fun drawCues(c: Canvas) {
+        if (!hintsActive()) return
+        val p = profile ?: return
+        var shown = 0
+        for (e in world.encounters) {
+            if (shown >= 2) break
+            if (e.resolved) continue
+            val training = p.phase == TrainerProfile.PHASE_TRAIN
+            if (!training && e.skill !in introSkills) continue
+            val dist = e.refX - px
+            if (dist < -30f || dist > effSpeed * 1.8f) continue
+            // Signals/gates/fake-outs keep their answer hidden: the badge says what to watch, not what to do.
+            val hideAnswer = e.skill == Skill.SIGNAL || e.skill == Skill.GATE || e.skill == Skill.FAKEOUT
+            val color = if (hideAnswer) amber else cueColor(e)
+            val a = when {
+                dist > effSpeed * 1.5f -> ((effSpeed * 1.8f - dist) / (effSpeed * 0.3f)).coerceIn(0f, 1f)
+                dist < 0f -> (1f + dist / 30f).coerceIn(0f, 1f)
+                else -> 1f
+            }
+            val text = cueText(e.skill)
+            floatPaint.textSize = 20f
+            val tw = floatPaint.measureText(text) + 28f
+            val bx = e.refX
+            val by = e.cueY
+            rect.set(bx - tw / 2f, by - 26f, bx + tw / 2f, by + 8f)
+            fill.color = Color.rgb(6, 16, 30); fill.alpha = (220 * a).toInt()
+            c.drawRoundRect(rect, 17f, 17f, fill)
+            btnStroke.color = color; btnStroke.alpha = (255 * a).toInt()
+            c.drawRoundRect(rect, 17f, 17f, btnStroke)
+            btnStroke.alpha = 255
+            floatPaint.color = color; floatPaint.alpha = (255 * a).toInt()
+            c.drawText(text, bx, by - 3f, floatPaint)
+            floatPaint.textSize = 24f
+            // pointer
+            path.reset()
+            path.moveTo(bx - 9f, by + 8f); path.lineTo(bx + 9f, by + 8f); path.lineTo(bx, by + 20f); path.close()
+            fill.color = color; fill.alpha = (255 * a).toInt()
+            c.drawPath(path, fill)
+            shown++
+        }
+    }
+
+    // ---------- Star map ----------
+    private fun mapStars(p: TrainerProfile): Array<FloatArray> {
+        val r = Random(p.cycle * 1000L + p.phase * 97L + mapPage * 13L + (if (p.expert) 5000L else 0L))
+        val left = 150f
+        val right = viewW - 150f
+        val top = 175f
+        val bottom = 575f
+        return Array(MAP_PAGE) { i ->
+            val row = i / 5
+            val colRaw = i % 5
+            val col = if (row % 2 == 0) colRaw else 4 - colRaw
+            val x = left + (right - left) * col / 4f + (r.nextFloat() - 0.5f) * 80f
+            val y = top + (bottom - top) * row / 4f + (r.nextFloat() - 0.5f) * 50f
+            floatArrayOf(x, y)
+        }
+    }
+
+    private fun mapPages(p: TrainerProfile) = (p.phaseLength() + MAP_PAGE - 1) / MAP_PAGE
+    private fun playBtnRect() = RectF(viewW - 270f, viewH - 96f, viewW - 30f, viewH - 26f)
+    private fun pagePrevRect() = RectF(viewW / 2f - 230f, viewH - 90f, viewW / 2f - 130f, viewH - 32f)
+    private fun pageNextRect() = RectF(viewW / 2f + 130f, viewH - 90f, viewW / 2f + 230f, viewH - 32f)
+
+    private fun mapTap(t: FloatArray) {
+        val p = profile ?: return
+        if (hit(backBtnRect(), t)) { toMenu(); return }
+        if (hit(playBtnRect(), t)) { prepareLevel(); return }
+        val pages = mapPages(p)
+        if (pages > 1 && hit(pagePrevRect(), t)) { mapPage = (mapPage - 1).coerceAtLeast(0); return }
+        if (pages > 1 && hit(pageNextRect(), t)) { mapPage = (mapPage + 1).coerceAtMost(pages - 1); return }
+        if (mapPage == p.level / MAP_PAGE) {
+            val st = mapStars(p)[p.level % MAP_PAGE]
+            val dx = t[0] - st[0]
+            val dy = t[1] - st[1]
+            if (dx * dx + dy * dy < 60f * 60f) prepareLevel()
+        }
+    }
+
+    private fun drawMap(c: Canvas) {
+        val p = profile ?: return
+        val cx = viewW / 2f
+        val stars = mapStars(p)
+        val base = mapPage * MAP_PAGE
+        val count = min(MAP_PAGE, p.phaseLength() - base)
+        val curPage = p.level / MAP_PAGE
+        val train = p.phase == TrainerProfile.PHASE_TRAIN
+
+        headPaint.textSize = 40f
+        headPaint.color = if (p.expert) danger else teal
+        c.drawText((if (p.expert) "EXPERT" else "TRAINER") + "  •  STAGE ${p.cycle + 1}", cx, 66f, headPaint)
+        headPaint.color = teal
+        headPaint.textSize = 54f
+        val sector = if (mapPages(p) > 1) "  •  Sector ${mapPage + 1}/${mapPages(p)}" else ""
+        c.drawText("${p.phaseName()}  —  level ${p.level + 1} of ${p.phaseLength()}$sector", cx, 104f, smallPaint)
+        btnText.textSize = 24f
+        drawButton(c, backBtnRect(), "‹ BACK", null, teal)
+        btnText.textSize = 30f
+
+        // links
+        for (i in 0 until count - 1) {
+            val g = base + i
+            val a = stars[i]
+            val b = stars[i + 1]
+            when {
+                g + 1 < p.level -> {
+                    stroke.color = lime; stroke.alpha = 200; stroke.strokeWidth = 4f
+                    c.drawLine(a[0], a[1], b[0], b[1], stroke)
+                }
+                g + 1 == p.level -> {
+                    val k = if (mapAnimate && mapPage == curPage) mapLinkAnim else 1f
+                    stroke.color = lime; stroke.alpha = 230; stroke.strokeWidth = 5f
+                    c.drawLine(a[0], a[1], a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, stroke)
+                }
+                else -> {
+                    stroke.color = muted; stroke.alpha = 60; stroke.strokeWidth = 2f
+                    c.drawLine(a[0], a[1], b[0], b[1], stroke)
+                }
+            }
+        }
+
+        // stars
+        for (i in 0 until count) {
+            val g = base + i
+            val x = stars[i][0]
+            val y = stars[i][1]
+            val done = g < p.level
+            val current = g == p.level
+            val appear = if (current && mapAnimate && mapPage == curPage) ((mapLinkAnim - 0.7f) / 0.3f).coerceIn(0f, 1f) else 1f
+            if (train && (g + 1) % TrainerProfile.REEVAL_EVERY == 0) {
+                stroke.color = amber; stroke.alpha = if (done) 220 else 120; stroke.strokeWidth = 2f
+                path.reset()
+                path.moveTo(x, y - 22f); path.lineTo(x + 22f, y); path.lineTo(x, y + 22f); path.lineTo(x - 22f, y); path.close()
+                c.drawPath(path, stroke)
+            }
+            if (p.expert && g % TrainerProfile.CHECKPOINT == 0) {
+                stroke.color = danger; stroke.alpha = if (done || current) 220 else 110; stroke.strokeWidth = 2f
+                c.drawCircle(x, y, 20f, stroke)
+            }
+            when {
+                done -> {
+                    fill.color = teal; fill.alpha = 60
+                    c.drawCircle(x, y, 16f, fill)
+                    fill.alpha = 255
+                    drawStar(c, x, y, 10f, teal)
+                }
+                current -> {
+                    val pulse = 0.5f + 0.5f * sin(animT * 4f)
+                    val col = if (p.expert) danger else lime
+                    fill.color = col; fill.alpha = ((60 + 80 * pulse) * appear).toInt()
+                    c.drawCircle(x, y, (26f + 8f * pulse) * appear, fill)
+                    fill.alpha = (255 * appear).toInt()
+                    drawStar(c, x, y, 15f * appear, col)
+                }
+                else -> {
+                    fill.color = muted; fill.alpha = 140
+                    c.drawCircle(x, y, 4f, fill)
+                }
+            }
+            creditPaint.color = if (current) Color.WHITE else muted
+            c.drawText("${g + 1}", x, y + 38f, creditPaint)
+        }
+        creditPaint.color = muted
+
+        // legend
+        leftPaint.color = muted; leftPaint.textSize = 17f
+        val legend = when {
+            p.expert -> "★ cleared   ○ checkpoint (lives refill)" + if (train) "   ◇ re-evaluation" else ""
+            train -> "★ cleared   ◇ re-evaluation every 10 levels"
+            else -> "★ cleared   Clear a star to light the link to the next"
+        }
+        c.drawText(legend, 28f, viewH - 20f, leftPaint)
+        leftPaint.textSize = 21f
+
+        if (mapPages(p) > 1) {
+            btnText.textSize = 28f
+            if (mapPage > 0) drawButton(c, pagePrevRect(), "‹", null, teal)
+            if (mapPage < mapPages(p) - 1) drawButton(c, pageNextRect(), "›", null, teal)
+            btnText.textSize = 30f
+        }
+        btnText.textSize = 28f
+        drawButton(c, playBtnRect(), "PLAY ${p.level + 1}  ▶", null, if (p.expert) danger else lime)
+        btnText.textSize = 30f
+    }
+
+    private fun drawStar(c: Canvas, x: Float, y: Float, r: Float, color: Int) {
+        if (r <= 0.5f) return
+        path.reset()
+        for (k in 0 until 8) {
+            val a = -1.5708f + k * 0.7854f
+            val rr = if (k % 2 == 0) r else r * 0.38f
+            val px2 = x + cos(a) * rr
+            val py2 = y + sin(a) * rr
+            if (k == 0) path.moveTo(px2, py2) else path.lineTo(px2, py2)
+        }
+        path.close()
+        val keep = fill.alpha
+        fill.color = color
+        fill.alpha = keep
+        c.drawPath(path, fill)
     }
 
     // ---------- Settings ----------
@@ -1940,9 +2225,12 @@ class Game(private val host: GameHost) {
         label(2, "Vibration", "Buzz when you crash")
         drawButton(c, settingBtn(2, 0), if (vibOn) "ON" else "OFF", null, if (vibOn) lime else muted)
 
-        label(3, "Reset progress", "Tap twice to confirm. Can't be undone.")
-        drawButton(c, settingBtn(3, 0), if (confirmReset == 0) "SURE?" else "TRAINER", null, danger)
-        drawButton(c, settingBtn(3, 1), if (confirmReset == 1) "SURE?" else "EXPERT", null, danger)
+        label(3, "Hazard hints", "Action badges above hazards in Trainer training levels")
+        drawButton(c, settingBtn(3, 0), if (hintsOn) "ON" else "OFF", null, if (hintsOn) lime else muted)
+
+        label(4, "Reset progress", "Tap twice to confirm. Can't be undone.")
+        drawButton(c, settingBtn(4, 0), if (confirmReset == 0) "SURE?" else "TRAINER", null, danger)
+        drawButton(c, settingBtn(4, 1), if (confirmReset == 1) "SURE?" else "EXPERT", null, danger)
         btnText.textSize = 30f
     }
 
@@ -2141,5 +2429,6 @@ class Game(private val host: GameHost) {
         private const val ROLE_JUMP = 1
         private const val ROLE_SLIDE = 2
         private const val ROLE_DASH = 3
+        private const val MAP_PAGE = 25
     }
 }

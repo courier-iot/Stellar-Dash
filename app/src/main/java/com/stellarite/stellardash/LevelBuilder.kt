@@ -122,7 +122,9 @@ class LevelConfig(
     /** Level length in seconds of running; <= 0 for endless. */
     val lengthSec: Float,
     val expert: Boolean,
-    val endless: Boolean
+    val endless: Boolean,
+    /** Hazards introduced on this level: guaranteed to appear (twice each). */
+    val intro: List<Skill> = emptyList()
 )
 
 class World {
@@ -167,6 +169,7 @@ class LevelBuilder(private val world: World) {
     private val ph = 40f
     private var s = 400f
     private var endlessD = 0f
+    private val forced = ArrayDeque<Skill>()
 
     fun start(config: LevelConfig, startX: Float) {
         cfg = config
@@ -175,6 +178,8 @@ class LevelBuilder(private val world: World) {
         world.lastTop = 520f
         world.platforms.add(Platform(startX - 400f, world.lastTop, 1700f, null))
         world.genX = startX + 1300f
+        forced.clear()
+        for (round in 0 until 2) for (sk in config.intro) forced.addLast(sk)
         if (!config.endless) world.levelEndX = world.genX + config.speed * config.lengthSec
     }
 
@@ -211,6 +216,7 @@ class LevelBuilder(private val world: World) {
     private fun enc(sk: Skill, ref: Float, end: Float, expect: Action? = null): Encounter {
         val e = Encounter(sk, ref, end)
         e.expect = expect
+        e.cueY = (world.lastTop - 190f).coerceAtLeast(110f)
         world.encounters.add(e)
         return e
     }
@@ -270,7 +276,12 @@ class LevelBuilder(private val world: World) {
         }
 
         val warm = w.segCount <= 2
-        val sk = if (warm) Skill.GAP else (pickSkill() ?: Skill.GAP)
+        val sk = when {
+            warm -> Skill.GAP
+            // New hazards on their intro level: every other segment until each has shown up twice.
+            forced.isNotEmpty() && w.segCount % 2 == 1 -> forced.removeFirst()
+            else -> pickSkill() ?: Skill.GAP
+        }
         val d = dOf(sk)
         when (sk) {
             Skill.GAP -> buildGap(d, null)

@@ -14,6 +14,12 @@ Your runner never stops. Read the terrain, react to warnings, and survive as lon
   3. **Retest (25 levels):** same structure as the test, so the results compare fairly.
   4. Back to Training, then Retest again, forever. Each loop is a new **Stage**.
   Dying restarts the level. Every attempt counts as data.
+  - **Star map:** each level is a star; clearing one lights the link to the next. Training is split
+    into 4 sectors of 25 stars.
+  - **Re-evaluation every 10 training levels:** recent results are compared with your last test and
+    the training focus is re-aimed (◇ stars on the map).
+  - **Hazard hints:** badges above hazards during training levels and on the test level where a
+    hazard is introduced (Settings → Hazard hints). Never shown in Expert.
 - **Expert Trainer** — the same loop with ~10% more speed, much denser hazards, extra mines,
   and **3 lives**. Lose them all and you go back to the last checkpoint (every 5 levels).
 - **Profile** — a reflex map: one node per test/retest that climbs as your rating improves,
@@ -31,7 +37,7 @@ Pick a layout in **Settings → Controls**:
 | Dash | Swipe right on the left half | DASH button (next to SLIDE) |
 
 - Hold jump for a full jump, quick tap for a short hop. Jump again in mid-air to double jump.
-- **Slide meter: 3 seconds of sliding, refills fully in 1 second.** Run it dry and you wait for the full refill. Jumping ends a slide; re-press to slide again.
+- **Slide meter: 2 seconds of sliding, refills fully in 2 seconds.** Run it dry and you wait for the full refill. Jumping ends a slide; re-press to slide again.
 - Slide while airborne = fast-fall slam. One air-dash per jump; dash cooldown ~0.9 s.
 - Dashing only makes you safe against **phase walls**. Spikes, mines and lasers still hurt.
 - Back button or the pause icon pauses.

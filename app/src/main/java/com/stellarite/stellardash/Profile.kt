@@ -15,7 +15,9 @@ class PhaseEvent(
     val title: String,
     val rating: Float,
     val prevRating: Float,
-    val focus: List<Skill>
+    val focus: List<Skill>,
+    val lines: List<String> = emptyList(),
+    val focusLabel: String = "Next 100 levels focus on: "
 )
 
 /**
@@ -41,6 +43,10 @@ class TrainerProfile(val expert: Boolean) {
     /** Stats from the most recently completed test/retest (drives training focus). */
     val lastTest = Array(Skill.COUNT) { SkillStat() }
     val history = ArrayList<TestResult>()
+    /** Stats since the last re-evaluation (training only). */
+    val recent = Array(Skill.COUNT) { SkillStat() }
+    /** Training focus weights; recalculated after each test and every 10 training levels. */
+    val focusW = FloatArray(Skill.COUNT) { 1f }
 
     // Frozen spec for the current level so retries replay the same layout.
     var specValid = false
@@ -85,15 +91,11 @@ class TrainerProfile(val expert: Boolean) {
         } else {
             var avg = 0f
             var n = 0
-            val totalDeaths = lastTest.sumOf { it.deaths }.coerceAtLeast(1)
             for (k in 0 until Skill.COUNT) {
                 specD[k] = diff[k]
                 if (!allowed(Skill.ALL[k])) { specW[k] = 0f; continue }
                 avg += diff[k]; n++
-                val st = lastTest[k]
-                val pr = st.passRate()
-                val weakness = if (pr < 0f) 0.7f else 1f - pr
-                specW[k] = 0.4f + 2.4f * weakness + 1.5f * st.deaths / totalDeaths.toFloat()
+                specW[k] = focusW[k]
             }
             avg /= n.coerceAtLeast(1)
             specSpeed = 420f + 320f * avg + (level % 10) * 5f
@@ -109,13 +111,15 @@ class TrainerProfile(val expert: Boolean) {
         w = specW.copyOf(),
         lengthSec = 24f,
         expert = expert,
-        endless = false
+        endless = false,
+        intro = if (isTestPhase()) Skill.ALL.filter { it.introLevel == level && allowed(it) } else emptyList()
     )
 
     fun recordEncounter(e: Encounter, died: Boolean) {
         val k = e.skill.ordinal
         block[k].add(e, died)
         if (phase == PHASE_TRAIN) {
+            recent[k].add(e, died)
             diff[k] = (diff[k] + if (e.passed) 0.03f else -0.06f).coerceIn(0.05f, 1f)
         }
     }
@@ -142,7 +146,9 @@ class TrainerProfile(val expert: Boolean) {
         levelAttempts = 0
         specValid = false
         if (expert && level % CHECKPOINT == 0) lives = MAX_LIVES
-        if (level < phaseLength()) return null
+        if (level < phaseLength()) {
+            return if (phase == PHASE_TRAIN && level % REEVAL_EVERY == 0) reevaluate() else null
+        }
 
         level = 0
         lives = MAX_LIVES
@@ -158,6 +164,8 @@ class TrainerProfile(val expert: Boolean) {
         history.add(result)
         for (k in 0 until Skill.COUNT) lastTest[k].copyFrom(block[k])
         if (!wasRetest) initDiffFromTest()
+        initFocusFromTest()
+        for (r in recent) r.clear()
         if (wasRetest) cycle++
         phase = PHASE_TRAIN
         val focus = weakest(2)
@@ -175,6 +183,46 @@ class TrainerProfile(val expert: Boolean) {
             .filter { lastTest[it.ordinal].tries > 0 }
             .sortedBy { lastTest[it.ordinal].score(it) }
             .take(n)
+
+    private fun initFocusFromTest() {
+        val totalDeaths = lastTest.sumOf { it.deaths }.coerceAtLeast(1)
+        for (k in 0 until Skill.COUNT) {
+            val st = lastTest[k]
+            val pr = st.passRate()
+            val weakness = if (pr < 0f) 0.7f else 1f - pr
+            focusW[k] = 0.4f + 2.4f * weakness + 1.5f * st.deaths / totalDeaths.toFloat()
+        }
+    }
+
+    /** Every 10 training levels: compare recent play with the last test and re-aim the training. */
+    private fun reevaluate(): PhaseEvent {
+        val improved = ArrayList<Skill>()
+        val struggling = ArrayList<Skill>()
+        val recentDeaths = recent.sumOf { it.deaths }.coerceAtLeast(1)
+        for (k in 0 until Skill.COUNT) {
+            val s = Skill.ALL[k]
+            if (!allowed(s)) continue
+            val r = recent[k]
+            if (r.tries >= 2) {
+                val rp = r.passRate()
+                val base = lastTest[k].passRate()
+                if (base >= 0f && rp - base >= 0.15f) improved.add(s)
+                if (rp < 0.6f) struggling.add(s)
+                focusW[k] = 0.4f + 2.4f * (1f - rp) + 1.0f * r.deaths / recentDeaths.toFloat()
+            } else {
+                // Barely seen lately: drift toward average so it still comes up.
+                focusW[k] = focusW[k] * 0.8f + 0.25f
+            }
+        }
+        for (r in recent) r.clear()
+        specValid = false
+        val focus = Skill.ALL.filter { allowed(it) }.sortedByDescending { focusW[it.ordinal] }.take(2)
+        val lines = ArrayList<String>()
+        lines.add(if (improved.isEmpty()) "Improving: keep going, nothing has jumped ahead yet"
+                  else "Improving: " + improved.take(3).joinToString(", ") { it.label })
+        if (struggling.isNotEmpty()) lines.add("Needs work: " + struggling.take(3).joinToString(", ") { it.label })
+        return PhaseEvent("RE-EVALUATION", -1f, -1f, focus, lines, "Next 10 levels focus on: ")
+    }
 
     private fun initDiffFromTest() {
         for (k in 0 until Skill.COUNT) {
@@ -218,6 +266,8 @@ class TrainerProfile(val expert: Boolean) {
         diff.fill(0.3f)
         for (b in block) b.clear()
         for (b in lastTest) b.clear()
+        for (b in recent) b.clear()
+        focusW.fill(1f)
         history.clear()
         specValid = false
     }
@@ -230,6 +280,8 @@ class TrainerProfile(val expert: Boolean) {
         j.put("diff", JSONArray().also { a -> diff.forEach { a.put(it.toDouble()) } })
         j.put("block", JSONArray().also { a -> block.forEach { a.put(it.toJson()) } })
         j.put("last", JSONArray().also { a -> lastTest.forEach { a.put(it.toJson()) } })
+        j.put("recent", JSONArray().also { a -> recent.forEach { a.put(it.toJson()) } })
+        j.put("fw", JSONArray().also { a -> focusW.forEach { a.put(it.toDouble()) } })
         val h = JSONArray()
         for (r in history) {
             h.put(
@@ -259,6 +311,15 @@ class TrainerProfile(val expert: Boolean) {
             j.optJSONArray("last")?.let { a ->
                 for (k in 0 until minOf(a.length(), Skill.COUNT)) a.optJSONObject(k)?.let { lastTest[k].fromJson(it) }
             }
+            j.optJSONArray("recent")?.let { a ->
+                for (k in 0 until minOf(a.length(), Skill.COUNT)) a.optJSONObject(k)?.let { recent[k].fromJson(it) }
+            }
+            val fw = j.optJSONArray("fw")
+            if (fw != null) {
+                for (k in 0 until minOf(fw.length(), Skill.COUNT)) focusW[k] = fw.optDouble(k, 1.0).toFloat()
+            } else {
+                initFocusFromTest()
+            }
             history.clear()
             j.optJSONArray("hist")?.let { a ->
                 for (i in 0 until a.length()) {
@@ -287,5 +348,6 @@ class TrainerProfile(val expert: Boolean) {
         const val TRAIN_LEVELS = 100
         const val MAX_LIVES = 3
         const val CHECKPOINT = 5
+        const val REEVAL_EVERY = 10
     }
 }
